@@ -1,6 +1,7 @@
 """Main LangGraph implementation for the Deep Research agent."""
 
 import asyncio
+import logging
 from typing import Literal
 
 from langchain.chat_models import init_chat_model
@@ -43,6 +44,8 @@ from open_deep_research.utils import (
     anthropic_websearch_called,
     get_all_tools,
     get_api_key_for_model,
+    get_base_url_for_model,
+    get_use_responses_api_for_model,
     get_model_token_limit,
     get_notes_from_tool_calls,
     get_today_str,
@@ -54,7 +57,13 @@ from open_deep_research.utils import (
 
 # Initialize a configurable model that we will use throughout the agent
 configurable_model = init_chat_model(
-    configurable_fields=("model", "max_tokens", "api_key"),
+    configurable_fields=(
+        "model",
+        "max_tokens",
+        "api_key",
+        "base_url",
+        "use_responses_api",
+    ),
 )
 
 async def clarify_with_user(state: AgentState, config: RunnableConfig) -> Command[Literal["write_research_brief", "__end__"]]:
@@ -82,6 +91,8 @@ async def clarify_with_user(state: AgentState, config: RunnableConfig) -> Comman
         "model": configurable.research_model,
         "max_tokens": configurable.research_model_max_tokens,
         "api_key": get_api_key_for_model(configurable.research_model, config),
+        "base_url": get_base_url_for_model(configurable.research_model),
+        "use_responses_api": get_use_responses_api_for_model(configurable.research_model),
         "tags": ["langsmith:nostream"]
     }
     
@@ -135,6 +146,8 @@ async def write_research_brief(state: AgentState, config: RunnableConfig) -> Com
         "model": configurable.research_model,
         "max_tokens": configurable.research_model_max_tokens,
         "api_key": get_api_key_for_model(configurable.research_model, config),
+        "base_url": get_base_url_for_model(configurable.research_model),
+        "use_responses_api": get_use_responses_api_for_model(configurable.research_model),
         "tags": ["langsmith:nostream"]
     }
     
@@ -195,6 +208,8 @@ async def supervisor(state: SupervisorState, config: RunnableConfig) -> Command[
         "model": configurable.research_model,
         "max_tokens": configurable.research_model_max_tokens,
         "api_key": get_api_key_for_model(configurable.research_model, config),
+        "base_url": get_base_url_for_model(configurable.research_model),
+        "use_responses_api": get_use_responses_api_for_model(configurable.research_model),
         "tags": ["langsmith:nostream"]
     }
     
@@ -393,6 +408,8 @@ async def researcher(state: ResearcherState, config: RunnableConfig) -> Command[
         "model": configurable.research_model,
         "max_tokens": configurable.research_model_max_tokens,
         "api_key": get_api_key_for_model(configurable.research_model, config),
+        "base_url": get_base_url_for_model(configurable.research_model),
+        "use_responses_api": get_use_responses_api_for_model(configurable.research_model),
         "tags": ["langsmith:nostream"]
     }
     
@@ -528,6 +545,8 @@ async def compress_research(state: ResearcherState, config: RunnableConfig):
         "model": configurable.compression_model,
         "max_tokens": configurable.compression_model_max_tokens,
         "api_key": get_api_key_for_model(configurable.compression_model, config),
+        "base_url": get_base_url_for_model(configurable.compression_model),
+        "use_responses_api": get_use_responses_api_for_model(configurable.compression_model),
         "tags": ["langsmith:nostream"]
     })
     
@@ -564,9 +583,14 @@ async def compress_research(state: ResearcherState, config: RunnableConfig):
             
         except Exception as e:
             synthesis_attempts += 1
+            logging.exception(
+                "Compression attempt %s/%s failed",
+                synthesis_attempts,
+                max_attempts,
+            )
             
             # Handle token limit exceeded by removing older messages
-            if is_token_limit_exceeded(e, configurable.research_model):
+            if is_token_limit_exceeded(e, configurable.compression_model):
                 researcher_messages = remove_up_to_last_ai_message(researcher_messages)
                 continue
             
@@ -628,6 +652,8 @@ async def final_report_generation(state: AgentState, config: RunnableConfig):
         "model": configurable.final_report_model,
         "max_tokens": configurable.final_report_model_max_tokens,
         "api_key": get_api_key_for_model(configurable.final_report_model, config),
+        "base_url": get_base_url_for_model(configurable.final_report_model),
+        "use_responses_api": get_use_responses_api_for_model(configurable.final_report_model),
         "tags": ["langsmith:nostream"]
     }
     

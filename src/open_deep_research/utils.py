@@ -43,7 +43,7 @@ TAVILY_SEARCH_DESCRIPTION = (
 @tool(description=TAVILY_SEARCH_DESCRIPTION)
 async def tavily_search(
     queries: List[str],
-    max_results: Annotated[int, InjectedToolArg] = 5,
+    max_results: Annotated[int, InjectedToolArg] = 1,
     topic: Annotated[Literal["general", "news", "finance"], InjectedToolArg] = "general",
     config: RunnableConfig = None
 ) -> str:
@@ -87,6 +87,8 @@ async def tavily_search(
         model=configurable.summarization_model,
         max_tokens=configurable.summarization_model_max_tokens,
         api_key=model_api_key,
+        base_url=get_base_url_for_model(configurable.summarization_model),
+        use_responses_api=get_use_responses_api_for_model(configurable.summarization_model),
         tags=["langsmith:nostream"]
     ).with_structured_output(Summary).with_retry(
         stop_after_attempt=configurable.max_structured_output_retries
@@ -137,7 +139,7 @@ async def tavily_search(
 
 async def tavily_search_async(
     search_queries, 
-    max_results: int = 5, 
+    max_results: int = 1,
     topic: Literal["general", "news", "finance"] = "general", 
     include_raw_content: bool = True, 
     config: RunnableConfig = None
@@ -912,6 +914,18 @@ def get_api_key_for_model(model_name: str, config: RunnableConfig):
         elif model_name.startswith("google"):
             return os.getenv("GOOGLE_API_KEY")
         return None
+
+def get_base_url_for_model(model_name: str):
+    """Get an optional custom API base URL for OpenAI-compatible models."""
+    if model_name.lower().startswith("openai:"):
+        return os.getenv("OPENAI_BASE_URL") or None
+    return None
+
+def get_use_responses_api_for_model(model_name: str):
+    """Whether an OpenAI-compatible model should use the Responses API."""
+    if not model_name.lower().startswith("openai:"):
+        return None
+    return os.getenv("OPENAI_USE_RESPONSES_API", "false").lower() == "true"
 
 def get_tavily_api_key(config: RunnableConfig):
     """Get Tavily API key from environment or config."""

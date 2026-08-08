@@ -183,47 +183,51 @@ After each search tool call, use think_tool to analyze the results:
 """
 
 
-compress_research_system_prompt = """You are a research assistant that has conducted research on a topic by calling several tools and web searches. Your job is now to clean up the findings, but preserve all of the relevant statements and information that the researcher has gathered. For context, today's date is {date}.
+compress_research_system_prompt = """你负责将研究记录压缩成高信息密度的证据摘要。
 
-<Task>
-You need to clean up information gathered from tool calls and web searches in the existing messages.
-All relevant information should be repeated and rewritten verbatim, but in a cleaner format.
-The purpose of this step is just to remove any obviously irrelevant or duplicative information.
-For example, if three sources all say "X", you could say "These three sources all stated X".
-Only these fully comprehensive cleaned findings are going to be returned to the user, so it's crucial that you don't lose any information from the raw messages.
-</Task>
+当前日期：{date}
 
 <Guidelines>
-1. Your output findings should be fully comprehensive and include ALL of the information and sources that the researcher has gathered from tool calls and web searches. It is expected that you repeat key information verbatim.
-2. This report can be as long as necessary to return ALL of the information that the researcher has gathered.
-3. In your report, you should return inline citations for each source that the researcher found.
-4. You should include a "Sources" section at the end of the report that lists all of the sources the researcher found with corresponding citations, cited against statements in the report.
-5. Make sure to include ALL of the sources that the researcher gathered in the report, and how they were used to answer the question!
-6. It's really important not to lose any sources. A later LLM will be used to merge this report with others, so having all of the sources is critical.
+1. 删除重复、无关、低价值和仅用于规划的内容。
+2. 将表达相同结论的多个来源合并为一条结论，并在结论后保留多个来源。
+3. 优先保留具体事实、数字、日期、争议、限制条件和直接支持研究问题的内容。
+4. 删除搜索过程、思考过程、工具调用说明和重复背景。
+5. 不要逐字复述网页摘要；使用简洁语言归纳。
+6. 每个唯一事实只出现一次。
+7. 不确定或互相冲突的资料必须明确标注，不能强行合并。
+8. 只保留实际用于结论的来源。
+9. 不得编造研究记录中不存在的事实、数字、结论或来源。
+10. 来源链接必须使用研究记录中实际出现的 URL。
+11. 输出控制在约 7500 tokens 内。
 </Guidelines>
 
 <Output Format>
-The report should be structured like this:
-**List of Queries and Tool Calls Made**
-**Fully Comprehensive Findings**
-**List of All Relevant Sources (with citations in the report)**
+## 核心结论
+直接回答当前研究主题的核心发现。
+
+## 合并后的关键证据
+按主题组织证据。合并表达相同结论的来源，并在相关结论后标注来源。
+
+## 分歧与不确定性
+列出资料之间的冲突、证据缺口、口径差异和无法确认的内容。没有明显分歧时写“未发现重大分歧”。
+
+## 来源
+只列出正文中实际使用的来源。每个唯一 URL 只出现一次。
 </Output Format>
 
 <Citation Rules>
-- Assign each unique URL a single citation number in your text
-- End with ### Sources that lists each source with corresponding numbers
-- IMPORTANT: Number sources sequentially without gaps (1,2,3,4...) in the final list regardless of which sources you choose
-- Example format:
+- 每个唯一 URL 只分配一个引用编号。
+- 引用编号必须连续，不得跳号。
+- 只列出正文实际引用的来源。
+- 示例：
   [1] Source Title: URL
   [2] Source Title: URL
 </Citation Rules>
-
-Critical Reminder: It is extremely important that any information that is even remotely relevant to the user's research topic is preserved verbatim (e.g. don't rewrite it, don't summarize it, don't paraphrase it).
 """
 
-compress_research_simple_human_message = """All above messages are about research conducted by an AI Researcher. Please clean up these findings.
-
-DO NOT summarize the information. I want the raw information returned, just in a cleaner format. Make sure all relevant information is preserved - you can rewrite findings verbatim."""
+compress_research_simple_human_message = """请根据系统要求，将以上研究记录压缩成高信息密度的证据摘要。
+重点保留直接支持当前研究主题的事实、数字、日期、限制条件、分歧和来源链接；删除重复内容、搜索过程、思考过程和工具调用说明。
+"""
 
 final_report_generation_prompt = """Based on all the research conducted, create a comprehensive, well-structured answer to the overall research brief:
 <Research Brief>
@@ -315,6 +319,23 @@ Here is the raw content of the webpage:
 <webpage_content>
 {webpage_content}
 </webpage_content>
+
+
+<Compression Requirements>
+请对网页内容进行高密度压缩，只保留直接支持研究主题的主要信息。
+
+要求：
+1. `summary` 和 `key_excerpts` 的全部可见输出，目标控制在约 300 tokens 内。
+2. 全部可见输出不得超过 350 tokens；API 的硬上限为 500 tokens。
+3. 优先保留具体事实、数字、日期、结论、限制条件、争议和重要定义。
+4. 删除导航栏、广告、作者介绍、重复段落、空泛背景和与研究主题无关的内容。
+5. 表达相同意思的内容只保留一次。
+6. 不要逐段复述网页，应该按关键结论合并归纳。
+7. `key_excerpts` 最多保留 5 条，每条只保留最有证据价值的原文片段。
+8. 如果网页内容过多，优先保证核心事实和证据完整，不要为了覆盖所有内容而写成长篇摘要。
+9. 不得添加网页原文中不存在的事实。
+</Compression Requirements>
+
 
 Please follow these guidelines to create your summary:
 
