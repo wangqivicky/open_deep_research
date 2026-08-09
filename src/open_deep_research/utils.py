@@ -6,6 +6,7 @@ import os
 import warnings
 from datetime import datetime, timedelta, timezone
 from typing import Annotated, Any, Dict, List, Literal, Optional
+from weakref import WeakKeyDictionary
 
 import aiohttp
 from langchain.chat_models import init_chat_model
@@ -40,6 +41,34 @@ TAVILY_SEARCH_DESCRIPTION = (
     "A search engine optimized for comprehensive, accurate, and trusted results. "
     "Useful for when you need to answer questions about current events."
 )
+
+# Share one limiter across concurrent Tavily tool calls in the same event loop.
+# Without a shared limiter, four tool calls with a limit of three could still
+# launch twelve webpage summarization model calls at once.
+_summarization_semaphores = WeakKeyDictionary()
+
+
+def _get_summarization_semaphore(max_concurrent: int) -> asyncio.Semaphore:
+    """Return the shared summarization semaphore for the current event loop."""
+    loop = asyncio.get_running_loop()
+    entry = _summarization_semaphores.get(loop)
+    if entry is None or entry[0] != max_concurrent:
+        entry = (max_concurrent, asyncio.Semaphore(max_concurrent))
+        _summarization_semaphores[loop] = entry
+    return entry[1]
+
+
+async def summarize_webpage_with_limit(
+    model: BaseChatModel,
+    webpage_content: str,
+    max_concurrent: int,
+) -> str:
+    """Wait for a shared slot before calling the webpage summarization model."""
+    semaphore = _get_summarization_semaphore(max_concurrent)
+    async with semaphore:
+        return await summarize_webpage(model, webpage_content)
+
+
 @tool(description=TAVILY_SEARCH_DESCRIPTION)
 async def tavily_search(
     queries: List[str],
@@ -58,12 +87,22 @@ async def tavily_search(
     Returns:
         Formatted string containing summarized search results
     """
+    configurable = Configuration.from_runnable_config(config)
+    include_domains = None
+    if configurable.include_domains:
+        include_domains = [
+            domain.strip()
+            for domain in configurable.include_domains.split(",")
+            if domain.strip()
+        ]
+
     # Step 1: Execute search queries asynchronously
     search_results = await tavily_search_async(
         queries,
         max_results=max_results,
         topic=topic,
         include_raw_content=True,
+        include_domains=include_domains,
         config=config
     )
     
@@ -76,8 +115,6 @@ async def tavily_search(
                 unique_results[url] = {**result, "query": response['query']}
     
     # Step 3: Set up the summarization model with configuration
-    configurable = Configuration.from_runnable_config(config)
-    
     # Character limit to stay within model token limits (configurable)
     max_char_to_include = configurable.max_content_length
     
@@ -101,9 +138,10 @@ async def tavily_search(
     
     summarization_tasks = [
         noop() if not result.get("raw_content") 
-        else summarize_webpage(
+        else summarize_webpage_with_limit(
             summarization_model, 
-            result['raw_content'][:max_char_to_include]
+            result['raw_content'][:max_char_to_include],
+            configurable.max_concurrent_summarizations,
         )
         for result in unique_results.values()
     ]
@@ -141,7 +179,8 @@ async def tavily_search_async(
     search_queries, 
     max_results: int = 1,
     topic: Literal["general", "news", "finance"] = "general", 
-    include_raw_content: bool = True, 
+    include_raw_content: bool = True,
+    include_domains: Optional[List[str]] = None,
     config: RunnableConfig = None
 ):
     """Execute multiple Tavily search queries asynchronously.
@@ -151,6 +190,7 @@ async def tavily_search_async(
         max_results: Maximum number of results per query
         topic: Topic category for filtering results
         include_raw_content: Whether to include full webpage content
+        include_domains: Optional domain whitelist for Tavily search
         config: Runtime configuration for API key access
         
     Returns:
@@ -160,13 +200,16 @@ async def tavily_search_async(
     tavily_client = AsyncTavilyClient(api_key=get_tavily_api_key(config))
     
     # Create search tasks for parallel execution
+    search_options = {
+        "max_results": max_results,
+        "include_raw_content": include_raw_content,
+        "topic": topic,
+    }
+    if include_domains:
+        search_options["include_domains"] = include_domains
+
     search_tasks = [
-        tavily_client.search(
-            query,
-            max_results=max_results,
-            include_raw_content=include_raw_content,
-            topic=topic
-        )
+        tavily_client.search(query, **search_options)
         for query in search_queries
     ]
     

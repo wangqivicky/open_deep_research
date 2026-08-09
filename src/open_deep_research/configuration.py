@@ -74,6 +74,49 @@ class Configuration(BaseModel):
             }
         }
     )
+    max_concurrent_summarizations: int = Field(
+        default=3,
+        ge=1,
+        metadata={
+            "x_oap_ui_config": {
+                "type": "slider",
+                "default": 3,
+                "min": 1,
+                "max": 20,
+                "step": 1,
+                "description": "Maximum number of webpage summarization model calls to run concurrently. Additional calls wait for an available slot."
+            }
+        }
+    )
+    email_report_enabled: bool = Field(
+        default=False,
+        metadata={
+            "x_oap_ui_config": {
+                "type": "boolean",
+                "default": False,
+                "description": "Send the final report by email after it is generated"
+            }
+        }
+    )
+    email_report_to: Optional[str] = Field(
+        default=None,
+        metadata={
+            "x_oap_ui_config": {
+                "type": "text",
+                "description": "Email recipient. Separate multiple addresses with commas."
+            }
+        }
+    )
+    email_report_subject: str = Field(
+        default="Open Deep Research final report",
+        metadata={
+            "x_oap_ui_config": {
+                "type": "text",
+                "default": "Open Deep Research final report",
+                "description": "Subject used for final report emails"
+            }
+        }
+    )
     # Research Configuration
     search_api: SearchAPI = Field(
         default=SearchAPI.TAVILY,
@@ -88,6 +131,15 @@ class Configuration(BaseModel):
                     {"label": "Anthropic Native Web Search", "value": SearchAPI.ANTHROPIC.value},
                     {"label": "None", "value": SearchAPI.NONE.value}
                 ]
+            }
+        }
+    )
+    include_domains: Optional[str] = Field(
+        default=None,
+        metadata={
+            "x_oap_ui_config": {
+                "type": "text",
+                "description": "Comma-separated domain whitelist for Tavily search, for example: gov.cn,who.int"
             }
         }
     )

@@ -20,6 +20,7 @@ from langgraph.types import Command
 from open_deep_research.configuration import (
     Configuration,
 )
+from open_deep_research.email_report import normalize_report_text, send_report_email_async
 from open_deep_research.prompts import (
     clarify_with_user_instructions,
     compress_research_simple_human_message,
@@ -676,11 +677,14 @@ async def final_report_generation(state: AgentState, config: RunnableConfig):
             final_report = await configurable_model.with_config(writer_model_config).ainvoke([
                 HumanMessage(content=final_report_prompt)
             ])
+            final_report_text = normalize_report_text(final_report)
+            if not final_report_text:
+                raise ValueError("Final report model returned no readable text content")
             
             # Return successful report generation
             return {
-                "final_report": final_report.content, 
-                "messages": [final_report],
+                "final_report": final_report_text,
+                "messages": [AIMessage(content=final_report_text)],
                 **cleared_state
             }
             
@@ -722,6 +726,35 @@ async def final_report_generation(state: AgentState, config: RunnableConfig):
         **cleared_state
     }
 
+
+async def send_report_email(state: AgentState, config: RunnableConfig):
+    """Send the generated final report by email when delivery is enabled."""
+    configurable = Configuration.from_runnable_config(config)
+
+    if not configurable.email_report_enabled:
+        return {"email_delivery_status": "disabled"}
+
+    report = normalize_report_text(state.get("final_report", ""))
+    if not report or report.startswith("Error generating final report:"):
+        return {"email_delivery_status": "skipped: final report generation failed"}
+
+    if not configurable.email_report_to:
+        logging.error(
+            "Email delivery is enabled, but EMAIL_REPORT_TO is not configured"
+        )
+        return {"email_delivery_status": "failed: EMAIL_REPORT_TO is required"}
+
+    try:
+        await send_report_email_async(
+            report=report,
+            recipient=configurable.email_report_to,
+            subject=configurable.email_report_subject,
+        )
+        return {"email_delivery_status": "sent"}
+    except Exception as email_error:
+        logging.exception("Failed to email the final report")
+        return {"email_delivery_status": f"failed: {email_error}"}
+
 # Main Deep Researcher Graph Construction
 # Creates the complete deep research workflow from user input to final report
 deep_researcher_builder = StateGraph(
@@ -735,11 +768,13 @@ deep_researcher_builder.add_node("clarify_with_user", clarify_with_user)        
 deep_researcher_builder.add_node("write_research_brief", write_research_brief)     # Research planning phase
 deep_researcher_builder.add_node("research_supervisor", supervisor_subgraph)       # Research execution phase
 deep_researcher_builder.add_node("final_report_generation", final_report_generation)  # Report generation phase
+deep_researcher_builder.add_node("send_report_email", send_report_email)           # Optional email delivery
 
 # Define main workflow edges for sequential execution
 deep_researcher_builder.add_edge(START, "clarify_with_user")                       # Entry point
 deep_researcher_builder.add_edge("research_supervisor", "final_report_generation") # Research to report
-deep_researcher_builder.add_edge("final_report_generation", END)                   # Final exit point
+deep_researcher_builder.add_edge("final_report_generation", "send_report_email")   # Report to email
+deep_researcher_builder.add_edge("send_report_email", END)                         # Final exit point
 
 # Compile the complete deep researcher workflow
 deep_researcher = deep_researcher_builder.compile()

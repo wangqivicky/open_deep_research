@@ -76,9 +76,67 @@ Open Deep Research supports a wide range of LLM providers via the [init_chat_mod
 
 Open Deep Research supports a wide range of search tools. By default it uses the [Tavily](https://www.tavily.com/) search API. Has full MCP compatibility and work native web search for Anthropic and OpenAI. See the `search_api` and `mcp_config` fields in the [configuration.py](https://github.com/langchain-ai/open_deep_research/blob/main/src/open_deep_research/configuration.py) file for more details. This can be accessed via the LangGraph Studio UI. 
 
+To restrict Tavily searches to specific domains, set a comma-separated whitelist
+in `.env` or the Assistant's `Include Domains` setting:
+
+```env
+INCLUDE_DOMAINS=gov.cn,stats.gov.cn,who.int
+```
+
+Use domain names without `https://` or paths. Leave the value empty to search the
+whole web. This setting applies to Tavily and is ignored by native OpenAI or
+Anthropic web search.
+
 #### Other 
 
 See the fields in the [configuration.py](https://github.com/langchain-ai/open_deep_research/blob/main/src/open_deep_research/configuration.py) for various other settings to customize the behavior of Open Deep Research. 
+
+Research limits can also be configured in `.env`:
+
+```env
+MAX_CONCURRENT_RESEARCH_UNITS=1
+MAX_CONCURRENT_SUMMARIZATIONS=3
+MAX_RESEARCHER_ITERATIONS=2
+MAX_REACT_TOOL_CALLS=3
+MAX_CONTENT_LENGTH=20000
+```
+
+Non-empty environment values take precedence over the corresponding Assistant
+settings in LangGraph Studio. Remove these variables from `.env` when you want
+the Assistant settings to control them.
+
+`MAX_CONCURRENT_SUMMARIZATIONS` limits simultaneous webpage-summary model calls.
+Additional summaries wait in a queue, and the next one starts as soon as any
+running summary releases a slot.
+
+#### Email the final report
+
+Final report email delivery is disabled by default. To enable it, configure the
+following values in `.env`:
+
+```env
+EMAIL_REPORT_ENABLED=true
+EMAIL_REPORT_TO=recipient@example.com
+EMAIL_REPORT_SUBJECT=Open Deep Research final report
+SMTP_HOST=smtp.example.com
+SMTP_PORT=587
+SMTP_SECURITY=starttls
+SMTP_USERNAME=sender@example.com
+SMTP_PASSWORD=your_app_password
+SMTP_FROM=sender@example.com
+```
+
+`SMTP_SECURITY` accepts `starttls`, `ssl`, or `none`. Multiple recipients can be
+separated with commas. Use an email-provider app password where required, and do
+not put SMTP credentials in `.env.example`. A delivery failure is reported in the
+graph output as `email_delivery_status` and does not discard the generated report.
+Email delivery runs as the separate `send_report_email` graph node after
+`final_report_generation`. The report's first Markdown `#` heading is used as the
+email subject; `EMAIL_REPORT_SUBJECT` is only the fallback when no heading exists.
+The email contains the complete report as responsive HTML with a UTF-8 plain-text
+fallback, never the serialized AI message metadata. On screens up to 600px wide,
+the report uses the full viewport with minimal padding for comfortable mobile
+reading.
 
 ### 📊 Evaluation
 

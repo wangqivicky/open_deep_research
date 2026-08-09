@@ -74,6 +74,8 @@ Guidelines:
 - For academic or scientific queries, prefer linking directly to the original paper or official journal publication rather than survey papers or secondary summaries.
 - For people, try linking directly to their LinkedIn profile, or their personal website if they have one.
 - If the query is in a specific language, prioritize sources published in that language.
+
+
 """
 
 lead_researcher_prompt = """You are a research supervisor. Your job is to conduct research by calling the "ConductResearch" tool. For context, today's date is {date}.
@@ -104,9 +106,15 @@ Think like a research manager with limited time and resources. Follow these step
 **Task Delegation Budgets** (Prevent excessive delegation):
 - **Bias towards single agent** - Use single agent for simplicity unless the user request has clear opportunity for parallelization
 - **Stop when you can answer confidently** - Don't keep delegating research for perfection
+- 如果现有资料已经覆盖用户问题的主要方面，就必须调用 ResearchComplete。
+- 不要仅仅因为还能找到更多资料而继续研究。
+- 当边际新增信息很少、来源开始重复，或剩余缺口不影响主要结论时，立即停止。
 - **Limit tool calls** - Always stop after {max_researcher_iterations} tool calls to ConductResearch and think_tool if you cannot find the right sources
 
 **Maximum {max_concurrent_research_units} parallel agents per iteration**
+
+
+
 </Hard Limits>
 
 <Show Your Thinking>
@@ -355,6 +363,8 @@ When handling different types of content:
 - For product pages: Keep key features, specifications, and unique selling points.
 
 Your summary should be significantly shorter than the original content but comprehensive enough to stand alone as a source of information. Aim for about 25-30 percent of the original length, unless the content is already concise.
+
+Do not include Markdown code fences or any text outside the JSON object.
 
 Present your summary in the following format:
 
