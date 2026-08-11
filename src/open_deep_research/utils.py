@@ -17,6 +17,7 @@ from langchain_core.messages import (
     MessageLikeRepresentation,
     filter_messages,
 )
+from langchain_core.output_parsers import PydanticOutputParser
 from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import (
     BaseTool,
@@ -120,14 +121,19 @@ async def tavily_search(
     
     # Initialize summarization model with retry logic
     model_api_key = get_api_key_for_model(configurable.summarization_model, config)
-    summarization_model = init_chat_model(
-        model=configurable.summarization_model,
-        max_tokens=configurable.summarization_model_max_tokens,
-        api_key=model_api_key,
-        base_url=get_base_url_for_model(configurable.summarization_model),
-        use_responses_api=get_use_responses_api_for_model(configurable.summarization_model),
-        tags=["langsmith:nostream"]
-    ).with_structured_output(Summary).with_retry(
+    summarization_model = (
+        init_chat_model(
+            model=configurable.summarization_model,
+            max_tokens=configurable.summarization_model_max_tokens,
+            api_key=model_api_key,
+            base_url=get_base_url_for_model(configurable.summarization_model),
+            use_responses_api=get_use_responses_api_for_model(
+                configurable.summarization_model
+            ),
+            tags=["langsmith:nostream"],
+        )
+        | PydanticOutputParser(pydantic_object=Summary)
+    ).with_retry(
         stop_after_attempt=configurable.max_structured_output_retries
     )
     
@@ -969,6 +975,7 @@ def get_use_responses_api_for_model(model_name: str):
     if not model_name.lower().startswith("openai:"):
         return None
     return os.getenv("OPENAI_USE_RESPONSES_API", "false").lower() == "true"
+
 
 def get_tavily_api_key(config: RunnableConfig):
     """Get Tavily API key from environment or config."""

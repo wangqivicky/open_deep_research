@@ -169,6 +169,61 @@ class Configuration(BaseModel):
             }
         }
     )
+    # Context budget policy. Supervisor can compact its active model view; the
+    # other entry points currently use these values for prediction and tracing.
+    supervisor_model_context_window: int = Field(
+        default=128000,
+        ge=1024,
+        metadata={
+            "x_oap_ui_config": {
+                "type": "number",
+                "default": 128000,
+                "description": "Context window used by the Supervisor context policy",
+            }
+        },
+    )
+    research_model_context_window: int = Field(
+        default=128000,
+        ge=1024,
+        metadata={
+            "x_oap_ui_config": {
+                "type": "number",
+                "default": 128000,
+                "description": "Context window used to estimate Researcher input utilization",
+            }
+        },
+    )
+    compression_model_context_window: int = Field(
+        default=128000,
+        ge=1024,
+        metadata={
+            "x_oap_ui_config": {
+                "type": "number",
+                "default": 128000,
+                "description": "Context window used to estimate research compression input utilization",
+            }
+        },
+    )
+    final_report_model_context_window: int = Field(
+        default=128000,
+        ge=1024,
+        metadata={
+            "x_oap_ui_config": {
+                "type": "number",
+                "default": 128000,
+                "description": "Context window used to estimate final report input utilization",
+            }
+        },
+    )
+    context_warning_ratio: float = Field(default=0.70, ge=0, le=1)
+    context_compaction_ratio: float = Field(default=0.80, ge=0, le=1)
+    context_hard_limit_ratio: float = Field(default=0.90, ge=0, le=1)
+    context_safety_margin_ratio: float = Field(default=0.05, ge=0, lt=1)
+    context_estimation_chars_per_token: float = Field(
+        default=2.0,
+        gt=0,
+        description="Conservative character-to-token ratio for pre-call estimates",
+    )
     # Model Configuration
     summarization_model: str = Field(
         default="openai:gpt-4.1-mini",

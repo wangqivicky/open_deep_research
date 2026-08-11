@@ -24,28 +24,22 @@ Deep research has broken out as one of the most popular agent applications. This
 ```bash
 git clone https://github.com/langchain-ai/open_deep_research.git
 cd open_deep_research
-uv venv
-source .venv/bin/activate  # On Windows: .venv\Scripts\activate
 ```
 
-2. Install dependencies:
-```bash
-uv sync
-# or
-uv pip install -r pyproject.toml
-```
-
-3. Set up your `.env` file to customize the environment variables (for model selection, search tools, and other configuration settings):
+2. Create `.env` once and fill in the required API keys:
 ```bash
 cp .env.example .env
 ```
 
-4. Launch agent with the LangGraph server locally:
-
+3. Start the project directly:
 ```bash
-# Install dependencies and start the LangGraph server
-uvx --refresh --from "langgraph-cli[inmem]" --with-editable . --python 3.11 langgraph dev --allow-blocking
+uv run langgraph dev
 ```
+
+`uv run` automatically creates or reuses `.venv`, selects the Python version from
+`.python-version`, and synchronizes the locked project dependencies. LangGraph loads
+`.env` through `langgraph.json`, so activating the virtual environment or exporting
+the same variables again is not required on later starts.
 
 This will open the LangGraph Studio UI in your browser.
 

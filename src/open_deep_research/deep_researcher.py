@@ -13,12 +13,17 @@ from langchain_core.messages import (
     filter_messages,
     get_buffer_string,
 )
+from langchain_core.output_parsers import PydanticOutputParser
 from langchain_core.runnables import RunnableConfig
 from langgraph.graph import END, START, StateGraph
 from langgraph.types import Command
 
 from open_deep_research.configuration import (
     Configuration,
+)
+from open_deep_research.context_manager import (
+    estimate_context_budget,
+    log_context_budget,
 )
 from open_deep_research.email_report import normalize_report_text, send_report_email_async
 from open_deep_research.prompts import (
@@ -48,7 +53,6 @@ from open_deep_research.utils import (
     get_base_url_for_model,
     get_use_responses_api_for_model,
     get_model_token_limit,
-    get_notes_from_tool_calls,
     get_today_str,
     is_token_limit_exceeded,
     openai_websearch_called,
@@ -66,6 +70,181 @@ configurable_model = init_chat_model(
         "use_responses_api",
     ),
 )
+
+
+def _predict_context_budget(
+    call_name: str,
+    messages,
+    configurable: Configuration,
+    *,
+    context_window: int,
+    reserved_output_tokens: int,
+    tools=None,
+):
+    """Estimate and log one model call without changing its input."""
+    budget = estimate_context_budget(
+        messages,
+        context_window=context_window,
+        reserved_output_tokens=reserved_output_tokens,
+        warning_ratio=configurable.context_warning_ratio,
+        compaction_ratio=configurable.context_compaction_ratio,
+        hard_limit_ratio=configurable.context_hard_limit_ratio,
+        safety_margin_ratio=configurable.context_safety_margin_ratio,
+        chars_per_token=configurable.context_estimation_chars_per_token,
+        tools=tools,
+    )
+    log_context_budget(call_name, budget)
+    return budget
+
+
+def _prepare_openai_compatible_messages(messages, model_name: str):
+    """Map system instructions to the developer role for custom Responses APIs."""
+    if not (
+        get_base_url_for_model(model_name)
+        and get_use_responses_api_for_model(model_name)
+    ):
+        return list(messages)
+
+    prepared_messages = []
+    for message in messages:
+        if isinstance(message, SystemMessage):
+            prepared_messages.append(
+                message.model_copy(
+                    update={
+                        "additional_kwargs": {
+                            **message.additional_kwargs,
+                            "__openai_role__": "developer",
+                        }
+                    }
+                )
+            )
+        else:
+            prepared_messages.append(message)
+    return prepared_messages
+
+
+def _collect_readable_notes(messages) -> str:
+    """Collect readable tool and assistant text without provider metadata."""
+    readable_parts = (
+        normalize_report_text(message)
+        for message in filter_messages(messages, include_types=["tool", "ai"])
+    )
+    return "\n".join(part for part in readable_parts if part)
+
+
+def _is_usable_research_text(text: str) -> bool:
+    """Reject empty or explicit error payloads as research evidence."""
+    normalized = text.strip()
+    return bool(normalized) and not normalized.startswith(
+        (
+            "Error executing tool:",
+            "Error synthesizing research report:",
+            "Error: Did not run this research",
+        )
+    )
+
+
+def _has_research_evidence(messages) -> bool:
+    """Return whether a researcher state contains usable external-tool output."""
+    for message in filter_messages(messages, include_types="tool"):
+        if getattr(message, "name", None) in {"think_tool", "ResearchComplete"}:
+            continue
+        if _is_usable_research_text(normalize_report_text(message)):
+            return True
+    return False
+
+
+def _get_completed_research_notes(messages) -> list[str]:
+    """Extract successful ConductResearch summaries, excluding reflections."""
+    notes = []
+    for message in filter_messages(messages, include_types="tool"):
+        if getattr(message, "name", None) != "ConductResearch":
+            continue
+        text = normalize_report_text(message)
+        if _is_usable_research_text(text):
+            notes.append(text)
+    return notes
+
+
+def _build_supervisor_active_context(
+    messages,
+    progress_summary: str,
+    compacted_message_count: int,
+):
+    """Build the Supervisor model view while retaining full history in state."""
+    base_count = min(2, len(messages))
+    compacted_message_count = max(base_count, compacted_message_count)
+    active_messages = list(messages[:base_count])
+    if progress_summary:
+        active_messages.append(
+            SystemMessage(
+                content=(
+                    "Research progress summary from earlier completed rounds:\n\n"
+                    f"{progress_summary}"
+                )
+            )
+        )
+    active_messages.extend(messages[compacted_message_count:])
+    return active_messages
+
+
+def _find_supervisor_compaction_cutoff(messages, compacted_message_count: int):
+    """Return a safe boundary that keeps the most recent AI/tool round intact."""
+    start = max(min(2, len(messages)), compacted_message_count)
+    ai_indices = [
+        index
+        for index in range(start, len(messages))
+        if isinstance(messages[index], AIMessage)
+    ]
+    if len(ai_indices) < 2:
+        return None
+    cutoff = ai_indices[-1]
+    return cutoff if cutoff > start else None
+
+
+async def _summarize_supervisor_history(
+    messages,
+    existing_summary: str,
+    configurable: Configuration,
+    config: RunnableConfig,
+) -> str:
+    """Merge older completed Supervisor rounds into a durable progress summary."""
+    prompt = f"""Create an updated research progress summary for a research supervisor.
+
+Preserve concrete findings, source URLs, completed research topics, important strategic
+decisions and reflections, unresolved gaps, conflicts, and recommended next actions.
+Do not invent facts. Keep enough detail that the supervisor can continue without the
+original messages.
+
+EXISTING PROGRESS SUMMARY:
+{existing_summary or "None"}
+
+NEWLY ARCHIVED MESSAGES:
+{get_buffer_string(messages)}
+"""
+    summary_messages = [HumanMessage(content=prompt)]
+    budget = _predict_context_budget(
+        "supervisor_context_compaction",
+        summary_messages,
+        configurable,
+        context_window=configurable.compression_model_context_window,
+        reserved_output_tokens=configurable.compression_model_max_tokens,
+    )
+    summary_model = configurable_model.with_config({
+        "model": configurable.compression_model,
+        "max_tokens": configurable.compression_model_max_tokens,
+        "api_key": get_api_key_for_model(configurable.compression_model, config),
+        "base_url": get_base_url_for_model(configurable.compression_model),
+        "use_responses_api": get_use_responses_api_for_model(configurable.compression_model),
+        "tags": ["langsmith:nostream"],
+        "metadata": budget.as_metadata("supervisor_context_compaction"),
+    })
+    response = await summary_model.ainvoke(summary_messages)
+    summary = normalize_report_text(response)
+    if not summary:
+        raise ValueError("Supervisor context compaction returned no readable text")
+    return summary
+
 
 async def clarify_with_user(state: AgentState, config: RunnableConfig) -> Command[Literal["write_research_brief", "__end__"]]:
     """Analyze user messages and ask clarifying questions if the research scope is unclear.
@@ -99,11 +278,9 @@ async def clarify_with_user(state: AgentState, config: RunnableConfig) -> Comman
     
     # Configure model with structured output and retry logic
     clarification_model = (
-        configurable_model
-        .with_structured_output(ClarifyWithUser)
-        .with_retry(stop_after_attempt=configurable.max_structured_output_retries)
-        .with_config(model_config)
-    )
+        configurable_model.with_config(model_config)
+        | PydanticOutputParser(pydantic_object=ClarifyWithUser)
+    ).with_retry(stop_after_attempt=configurable.max_structured_output_retries)
     
     # Step 3: Analyze whether clarification is needed
     prompt_content = clarify_with_user_instructions.format(
@@ -154,11 +331,9 @@ async def write_research_brief(state: AgentState, config: RunnableConfig) -> Com
     
     # Configure model for structured research question generation
     research_model = (
-        configurable_model
-        .with_structured_output(ResearchQuestion)
-        .with_retry(stop_after_attempt=configurable.max_structured_output_retries)
-        .with_config(research_model_config)
-    )
+        configurable_model.with_config(research_model_config)
+        | PydanticOutputParser(pydantic_object=ResearchQuestion)
+    ).with_retry(stop_after_attempt=configurable.max_structured_output_retries)
     
     # Step 2: Generate structured research brief from user messages
     prompt_content = transform_messages_into_research_topic_prompt.format(
@@ -225,16 +400,89 @@ async def supervisor(state: SupervisorState, config: RunnableConfig) -> Command[
         .with_config(research_model_config)
     )
     
-    # Step 2: Generate supervisor response based on current context
-    supervisor_messages = state.get("supervisor_messages", [])
-    response = await research_model.ainvoke(supervisor_messages)
+    # Step 2: Build the Supervisor's active model view. Full history remains in
+    # graph state; older completed rounds may be represented by one summary.
+    supervisor_messages = list(state.get("supervisor_messages", []))
+    base_message_count = min(2, len(supervisor_messages))
+    progress_summary = state.get("supervisor_progress_summary", "")
+    compacted_message_count = max(
+        base_message_count,
+        state.get("supervisor_compacted_message_count", base_message_count),
+    )
+    active_messages = _build_supervisor_active_context(
+        supervisor_messages,
+        progress_summary,
+        compacted_message_count,
+    )
+    model_messages = _prepare_openai_compatible_messages(
+        active_messages,
+        configurable.research_model,
+    )
+    initial_budget = _predict_context_budget(
+        "supervisor",
+        model_messages,
+        configurable,
+        context_window=configurable.supervisor_model_context_window,
+        reserved_output_tokens=configurable.research_model_max_tokens,
+        tools=lead_researcher_tools,
+    )
+
+    compaction_triggered = False
+    if initial_budget.action in {"compact", "hard_limit"}:
+        cutoff = _find_supervisor_compaction_cutoff(
+            supervisor_messages,
+            compacted_message_count,
+        )
+        if cutoff is not None:
+            progress_summary = await _summarize_supervisor_history(
+                supervisor_messages[compacted_message_count:cutoff],
+                progress_summary,
+                configurable,
+                config,
+            )
+            compacted_message_count = cutoff
+            active_messages = _build_supervisor_active_context(
+                supervisor_messages,
+                progress_summary,
+                compacted_message_count,
+            )
+            model_messages = _prepare_openai_compatible_messages(
+                active_messages,
+                configurable.research_model,
+            )
+            compaction_triggered = True
+
+    context_budget = _predict_context_budget(
+        "supervisor",
+        model_messages,
+        configurable,
+        context_window=configurable.supervisor_model_context_window,
+        reserved_output_tokens=configurable.research_model_max_tokens,
+        tools=lead_researcher_tools,
+    )
+    budget_metadata = context_budget.as_metadata("supervisor")
+    budget_metadata.update({
+        "context_budget_compaction_triggered": compaction_triggered,
+        "context_budget_pre_compaction_action": initial_budget.action,
+        "context_budget_pre_compaction_utilization": round(
+            initial_budget.utilization, 6
+        ),
+        "context_budget_full_message_count": len(supervisor_messages),
+        "context_budget_active_message_count": len(model_messages),
+        "context_budget_compacted_message_count": compacted_message_count,
+    })
+    response = await research_model.with_config(
+        {"metadata": budget_metadata}
+    ).ainvoke(model_messages)
     
     # Step 3: Update state and proceed to tool execution
     return Command(
         goto="supervisor_tools",
         update={
             "supervisor_messages": [response],
-            "research_iterations": state.get("research_iterations", 0) + 1
+            "research_iterations": state.get("research_iterations", 0) + 1,
+            "supervisor_progress_summary": progress_summary,
+            "supervisor_compacted_message_count": compacted_message_count,
         }
     )
 
@@ -272,7 +520,7 @@ async def supervisor_tools(state: SupervisorState, config: RunnableConfig) -> Co
         return Command(
             goto=END,
             update={
-                "notes": get_notes_from_tool_calls(supervisor_messages),
+                "notes": _get_completed_research_notes(supervisor_messages),
                 "research_brief": state.get("research_brief", "")
             }
         )
@@ -346,16 +594,18 @@ async def supervisor_tools(state: SupervisorState, config: RunnableConfig) -> Co
                 update_payload["raw_notes"] = [raw_notes_concat]
                 
         except Exception as e:
-            # Handle research execution errors
-            if is_token_limit_exceeded(e, configurable.research_model) or True:
-                # Token limit exceeded or other error - end research phase
+            # A token-limit failure may still leave earlier completed research
+            # units available. Other failures must remain visible rather than
+            # silently producing a report without evidence.
+            if is_token_limit_exceeded(e, configurable.research_model):
                 return Command(
                     goto=END,
                     update={
-                        "notes": get_notes_from_tool_calls(supervisor_messages),
+                        "notes": _get_completed_research_notes(supervisor_messages),
                         "research_brief": state.get("research_brief", "")
                     }
                 )
+            raise
     
     # Step 3: Return command with all tool results
     update_payload["supervisor_messages"] = all_tool_messages
@@ -378,7 +628,7 @@ supervisor_builder.add_edge(START, "supervisor")  # Entry point to supervisor
 # Compile supervisor subgraph for use in main workflow
 supervisor_subgraph = supervisor_builder.compile()
 
-async def researcher(state: ResearcherState, config: RunnableConfig) -> Command[Literal["researcher_tools"]]:
+async def researcher(state: ResearcherState, config: RunnableConfig) -> Command[Literal["researcher_tools", "compress_research"]]:
     """Individual researcher that conducts focused research on specific topics.
     
     This researcher is given a specific research topic by the supervisor and uses
@@ -394,7 +644,7 @@ async def researcher(state: ResearcherState, config: RunnableConfig) -> Command[
     """
     # Step 1: Load configuration and validate tool availability
     configurable = Configuration.from_runnable_config(config)
-    researcher_messages = state.get("researcher_messages", [])
+    researcher_messages = list(state.get("researcher_messages", []))
     
     # Get all available research tools (search, MCP, think_tool)
     tools = await get_all_tools(config)
@@ -429,8 +679,30 @@ async def researcher(state: ResearcherState, config: RunnableConfig) -> Command[
     )
     
     # Step 3: Generate researcher response with system context
-    messages = [SystemMessage(content=researcher_prompt)] + researcher_messages
-    response = await research_model.ainvoke(messages)
+    messages = _prepare_openai_compatible_messages(
+        [SystemMessage(content=researcher_prompt)] + researcher_messages,
+        configurable.research_model,
+    )
+    context_budget = _predict_context_budget(
+        "researcher",
+        messages,
+        configurable,
+        context_window=configurable.research_model_context_window,
+        reserved_output_tokens=configurable.research_model_max_tokens,
+        tools=tools,
+    )
+    try:
+        response = await research_model.with_config(
+            {"metadata": context_budget.as_metadata("researcher")}
+        ).ainvoke(messages)
+    except Exception:
+        if _has_research_evidence(researcher_messages):
+            logging.exception(
+                "Researcher model failed after evidence was collected; "
+                "falling back to compression"
+            )
+            return Command(goto="compress_research")
+        raise
     
     # Step 4: Update state and proceed to tool execution
     return Command(
@@ -468,7 +740,7 @@ async def researcher_tools(state: ResearcherState, config: RunnableConfig) -> Co
     """
     # Step 1: Extract current state and check early exit conditions
     configurable = Configuration.from_runnable_config(config)
-    researcher_messages = state.get("researcher_messages", [])
+    researcher_messages = list(state.get("researcher_messages", []))
     most_recent_message = researcher_messages[-1]
     
     # Early exit if no tool calls were made (including native web search)
@@ -551,8 +823,8 @@ async def compress_research(state: ResearcherState, config: RunnableConfig):
         "tags": ["langsmith:nostream"]
     })
     
-    # Step 2: Prepare messages for compression
-    researcher_messages = state.get("researcher_messages", [])
+    # Step 2: Prepare messages for compression without mutating graph state.
+    researcher_messages = list(state.get("researcher_messages", []))
     
     # Add instruction to switch from research mode to compression mode
     researcher_messages.append(HumanMessage(content=compress_research_simple_human_message))
@@ -565,20 +837,32 @@ async def compress_research(state: ResearcherState, config: RunnableConfig):
         try:
             # Create system prompt focused on compression task
             compression_prompt = compress_research_system_prompt.format(date=get_today_str())
-            messages = [SystemMessage(content=compression_prompt)] + researcher_messages
+            messages = _prepare_openai_compatible_messages(
+                [SystemMessage(content=compression_prompt)] + researcher_messages,
+                configurable.compression_model,
+            )
+            context_budget = _predict_context_budget(
+                "compress_research",
+                messages,
+                configurable,
+                context_window=configurable.compression_model_context_window,
+                reserved_output_tokens=configurable.compression_model_max_tokens,
+            )
             
             # Execute compression
-            response = await synthesizer_model.ainvoke(messages)
+            response = await synthesizer_model.with_config(
+                {"metadata": context_budget.as_metadata("compress_research")}
+            ).ainvoke(messages)
+            compressed_research = normalize_report_text(response)
+            if not compressed_research:
+                raise ValueError("Compression model returned no readable text content")
             
             # Extract raw notes from all tool and AI messages
-            raw_notes_content = "\n".join([
-                str(message.content) 
-                for message in filter_messages(researcher_messages, include_types=["tool", "ai"])
-            ])
+            raw_notes_content = _collect_readable_notes(researcher_messages)
             
             # Return successful compression result
             return {
-                "compressed_research": str(response.content),
+                "compressed_research": compressed_research,
                 "raw_notes": [raw_notes_content]
             }
             
@@ -599,10 +883,7 @@ async def compress_research(state: ResearcherState, config: RunnableConfig):
             continue
     
     # Step 4: Return error result if all attempts failed
-    raw_notes_content = "\n".join([
-        str(message.content) 
-        for message in filter_messages(researcher_messages, include_types=["tool", "ai"])
-    ])
+    raw_notes_content = _collect_readable_notes(researcher_messages)
     
     return {
         "compressed_research": "Error synthesizing research report: Maximum retries exceeded",
@@ -643,9 +924,25 @@ async def final_report_generation(state: AgentState, config: RunnableConfig):
         Dictionary containing the final report and cleared state
     """
     # Step 1: Extract research findings and prepare state cleanup
-    notes = state.get("notes", [])
+    notes = [
+        text
+        for note in state.get("notes", [])
+        if _is_usable_research_text(text := normalize_report_text(note))
+    ]
     cleared_state = {"notes": {"type": "override", "value": []}}
     findings = "\n".join(notes)
+
+    if not findings:
+        failure_message = (
+            "Error generating final report: No usable research findings were "
+            "returned. The report was not generated to avoid presenting an "
+            "unsupported answer."
+        )
+        return {
+            "final_report": failure_message,
+            "messages": [AIMessage(content=failure_message)],
+            **cleared_state,
+        }
     
     # Step 2: Configure the final report generation model
     configurable = Configuration.from_runnable_config(config)
@@ -672,11 +969,20 @@ async def final_report_generation(state: AgentState, config: RunnableConfig):
                 findings=findings,
                 date=get_today_str()
             )
+            final_report_messages = [HumanMessage(content=final_report_prompt)]
+            context_budget = _predict_context_budget(
+                "final_report_generation",
+                final_report_messages,
+                configurable,
+                context_window=configurable.final_report_model_context_window,
+                reserved_output_tokens=configurable.final_report_model_max_tokens,
+            )
             
             # Generate the final report
-            final_report = await configurable_model.with_config(writer_model_config).ainvoke([
-                HumanMessage(content=final_report_prompt)
-            ])
+            final_report = await configurable_model.with_config({
+                **writer_model_config,
+                "metadata": context_budget.as_metadata("final_report_generation"),
+            }).ainvoke(final_report_messages)
             final_report_text = normalize_report_text(final_report)
             if not final_report_text:
                 raise ValueError("Final report model returned no readable text content")

@@ -6,7 +6,7 @@ from typing import Annotated, Optional
 from langchain_core.messages import MessageLikeRepresentation
 from langgraph.graph import MessagesState
 from pydantic import BaseModel, Field
-from typing_extensions import TypedDict
+from typing_extensions import NotRequired, TypedDict
 
 
 ###################
@@ -80,6 +80,8 @@ class SupervisorState(TypedDict):
     notes: Annotated[list[str], override_reducer] = []
     research_iterations: int = 0
     raw_notes: Annotated[list[str], override_reducer] = []
+    supervisor_progress_summary: NotRequired[str]
+    supervisor_compacted_message_count: NotRequired[int]
 
 class ResearcherState(TypedDict):
     """State for individual researchers conducting research."""

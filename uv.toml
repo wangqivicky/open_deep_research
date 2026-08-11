@@ -1,0 +1,4 @@
+# Keep uv's cache inside the project and prefer the already-installed Python,
+# so startup does not depend on uv-managed files under the C drive.
+cache-dir = ".uv-cache"
+python-preference = "system"
