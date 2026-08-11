@@ -134,6 +134,90 @@ def test_researcher_attaches_context_budget_metadata(monkeypatch):
     assert _budget_calls(model) == ["researcher"]
 
 
+def test_researcher_compacts_old_rounds_and_keeps_recent_round_intact(monkeypatch):
+    model = FakeModel(AIMessage(content="continue research"))
+    monkeypatch.setattr(deep_researcher, "configurable_model", model)
+    archived = []
+
+    async def fake_get_all_tools(config):
+        return [deep_researcher.think_tool]
+
+    async def fake_summarize(
+        messages, research_topic, existing_summary, configurable, config
+    ):
+        archived.extend(messages)
+        return "Verified earlier evidence with source https://example.com/old."
+
+    monkeypatch.setattr(deep_researcher, "get_all_tools", fake_get_all_tools)
+    monkeypatch.setattr(
+        deep_researcher,
+        "_summarize_researcher_history",
+        fake_summarize,
+    )
+    old_evidence_a = "old-evidence-a " * 1500
+    old_evidence_b = "old-evidence-b " * 1500
+    messages = [
+        HumanMessage(content="research topic must remain verbatim"),
+        AIMessage(content="first search decision"),
+        ToolMessage(
+            content=old_evidence_a,
+            name="tavily_search",
+            tool_call_id="search-1",
+        ),
+        AIMessage(content="second search decision"),
+        ToolMessage(
+            content=old_evidence_b,
+            name="tavily_search",
+            tool_call_id="search-2",
+        ),
+        AIMessage(content="latest search decision"),
+        ToolMessage(
+            content="latest evidence must remain verbatim",
+            name="tavily_search",
+            tool_call_id="search-3",
+        ),
+    ]
+
+    result = asyncio.run(
+        deep_researcher.researcher(
+            {
+                "researcher_messages": messages,
+                "research_topic": "research topic must remain verbatim",
+            },
+            {
+                "configurable": {
+                    "research_model_context_window": 30000,
+                }
+            },
+        )
+    )
+
+    assert len(messages) == 7
+    assert [message.content for message in archived] == [
+        "first search decision",
+        old_evidence_a,
+        "second search decision",
+        old_evidence_b,
+    ]
+    active_contents = [message.content for message in model.invocations[-1]]
+    assert "research topic must remain verbatim" in active_contents
+    assert any("Verified earlier evidence" in content for content in active_contents)
+    assert old_evidence_a not in active_contents
+    assert old_evidence_b not in active_contents
+    assert "latest search decision" in active_contents
+    assert "latest evidence must remain verbatim" in active_contents
+    assert result.update["researcher_compacted_message_count"] == 5
+    assert result.update["research_progress_summary"].startswith("Verified earlier")
+    researcher_metadata = next(
+        config["metadata"]
+        for config in reversed(model.configs)
+        if config.get("metadata", {}).get("context_budget_call") == "researcher"
+    )
+    assert researcher_metadata["context_budget_compaction_triggered"] is True
+    assert researcher_metadata["context_budget_full_message_count"] == 8
+    assert researcher_metadata["context_budget_active_message_count"] == 5
+
+
 def test_researcher_failure_with_existing_search_results_falls_back_to_compression(
     monkeypatch,
 ):
@@ -214,6 +298,60 @@ def test_compression_normalizes_output_and_does_not_mutate_state(monkeypatch):
     assert "must-not-leak" not in "\n".join(result["raw_notes"])
     assert "source summary" in "\n".join(result["raw_notes"])
     assert _budget_calls(model) == ["compress_research"]
+
+
+def test_compression_uses_progress_summary_plus_recent_without_archived_originals(
+    monkeypatch,
+):
+    model = FakeModel(AIMessage(content="# Canonical compressed research"))
+    monkeypatch.setattr(deep_researcher, "configurable_model", model)
+    messages = [
+        HumanMessage(content="original research topic"),
+        AIMessage(content="archived search decision"),
+        ToolMessage(
+            content="archived original evidence",
+            name="tavily_search",
+            tool_call_id="search-old",
+        ),
+        AIMessage(content="latest search decision"),
+        ToolMessage(
+            content="latest original evidence",
+            name="tavily_search",
+            tool_call_id="search-latest",
+        ),
+    ]
+
+    result = asyncio.run(
+        deep_researcher.compress_research(
+            {
+                "researcher_messages": messages,
+                "research_progress_summary": (
+                    "Archived evidence summary https://example.com/source"
+                ),
+                "researcher_compacted_message_count": 3,
+            },
+            {"configurable": {}},
+        )
+    )
+
+    model_contents = [message.content for message in model.invocations[-1]]
+    assert "original research topic" in model_contents
+    assert any("Archived evidence summary" in content for content in model_contents)
+    assert "archived search decision" not in model_contents
+    assert "archived original evidence" not in model_contents
+    assert "latest search decision" in model_contents
+    assert "latest original evidence" in model_contents
+    assert result["compressed_research"] == "# Canonical compressed research"
+    assert "archived original evidence" in "\n".join(result["raw_notes"])
+    compression_metadata = next(
+        config["metadata"]
+        for config in reversed(model.configs)
+        if config.get("metadata", {}).get("context_budget_call")
+        == "compress_research"
+    )
+    assert compression_metadata["context_budget_input_source"] == (
+        "summary_plus_recent"
+    )
 
 
 def test_final_report_attaches_context_budget_metadata(monkeypatch):

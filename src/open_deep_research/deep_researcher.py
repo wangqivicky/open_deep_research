@@ -246,6 +246,117 @@ NEWLY ARCHIVED MESSAGES:
     return summary
 
 
+def _build_researcher_active_context(
+    messages,
+    progress_summary: str,
+    compacted_message_count: int,
+):
+    """Build the Researcher view while keeping the original topic unchanged."""
+    base_count = min(1, len(messages))
+    compacted_message_count = max(base_count, compacted_message_count)
+    active_messages = list(messages[:base_count])
+    if progress_summary:
+        active_messages.append(
+            HumanMessage(
+                content=(
+                    "Evidence summary from earlier completed research rounds:\n\n"
+                    f"{progress_summary}"
+                )
+            )
+        )
+    active_messages.extend(messages[compacted_message_count:])
+    return active_messages
+
+
+def _build_research_compression_context(
+    messages,
+    progress_summary: str,
+    compacted_message_count: int,
+):
+    """Use either full history or summary plus non-overlapping recent messages."""
+    base_count = min(1, len(messages))
+    compacted_message_count = max(base_count, compacted_message_count)
+    if progress_summary and compacted_message_count > base_count:
+        return (
+            _build_researcher_active_context(
+                messages,
+                progress_summary,
+                compacted_message_count,
+            ),
+            "summary_plus_recent",
+        )
+    return list(messages), "full_history"
+
+
+def _find_researcher_compaction_cutoff(
+    messages,
+    compacted_message_count: int,
+    *,
+    keep_recent_rounds: int,
+):
+    """Find an AI-message boundary without splitting an AI/tool round."""
+    start = max(min(1, len(messages)), compacted_message_count)
+    ai_indices = [
+        index
+        for index in range(start, len(messages))
+        if isinstance(messages[index], AIMessage)
+    ]
+    if len(ai_indices) <= keep_recent_rounds:
+        return None
+    cutoff = ai_indices[-keep_recent_rounds]
+    return cutoff if cutoff > start else None
+
+
+async def _summarize_researcher_history(
+    messages,
+    research_topic: str,
+    existing_summary: str,
+    configurable: Configuration,
+    config: RunnableConfig,
+) -> str:
+    """Merge archived research rounds into a source-preserving evidence summary."""
+    prompt = f"""Update the evidence progress summary for the research topic below.
+
+Preserve verified facts, numbers, dates, source URLs, source-to-claim relationships,
+conflicts, unresolved gaps, unsuccessful search directions, and recommended next
+searches. Remove duplicate evidence, low-value process narration, and tool mechanics.
+Do not invent facts or URLs. The output must stand alone for a research agent.
+
+RESEARCH TOPIC:
+{research_topic}
+
+EXISTING EVIDENCE SUMMARY:
+{existing_summary or "None"}
+
+NEWLY ARCHIVED RESEARCH MESSAGES:
+{get_buffer_string(messages)}
+"""
+    summary_messages = [HumanMessage(content=prompt)]
+    budget = _predict_context_budget(
+        "researcher_context_compaction",
+        summary_messages,
+        configurable,
+        context_window=configurable.compression_model_context_window,
+        reserved_output_tokens=configurable.compression_model_max_tokens,
+    )
+    summary_model = configurable_model.with_config({
+        "model": configurable.compression_model,
+        "max_tokens": configurable.compression_model_max_tokens,
+        "api_key": get_api_key_for_model(configurable.compression_model, config),
+        "base_url": get_base_url_for_model(configurable.compression_model),
+        "use_responses_api": get_use_responses_api_for_model(
+            configurable.compression_model
+        ),
+        "tags": ["langsmith:nostream"],
+        "metadata": budget.as_metadata("researcher_context_compaction"),
+    })
+    response = await summary_model.ainvoke(summary_messages)
+    summary = normalize_report_text(response)
+    if not summary:
+        raise ValueError("Researcher context compaction returned no readable text")
+    return summary
+
+
 async def clarify_with_user(state: AgentState, config: RunnableConfig) -> Command[Literal["write_research_brief", "__end__"]]:
     """Analyze user messages and ask clarifying questions if the research scope is unclear.
     
@@ -678,11 +789,67 @@ async def researcher(state: ResearcherState, config: RunnableConfig) -> Command[
         .with_config(research_model_config)
     )
     
-    # Step 3: Generate researcher response with system context
+    # Step 3: Build the active Researcher view. The original topic remains
+    # verbatim while older completed AI/tool rounds may be represented once by
+    # an evidence progress summary.
+    base_message_count = min(1, len(researcher_messages))
+    research_topic = state.get("research_topic", "") or (
+        normalize_report_text(researcher_messages[0])
+        if researcher_messages
+        else ""
+    )
+    progress_summary = state.get("research_progress_summary", "")
+    compacted_message_count = max(
+        base_message_count,
+        state.get("researcher_compacted_message_count", base_message_count),
+    )
+    active_researcher_messages = _build_researcher_active_context(
+        researcher_messages,
+        progress_summary,
+        compacted_message_count,
+    )
     messages = _prepare_openai_compatible_messages(
-        [SystemMessage(content=researcher_prompt)] + researcher_messages,
+        [SystemMessage(content=researcher_prompt)] + active_researcher_messages,
         configurable.research_model,
     )
+    initial_budget = _predict_context_budget(
+        "researcher",
+        messages,
+        configurable,
+        context_window=configurable.research_model_context_window,
+        reserved_output_tokens=configurable.research_model_max_tokens,
+        tools=tools,
+    )
+
+    compaction_triggered = False
+    if initial_budget.action in {"compact", "hard_limit"}:
+        keep_recent_rounds = 1 if initial_budget.action == "hard_limit" else 2
+        cutoff = _find_researcher_compaction_cutoff(
+            researcher_messages,
+            compacted_message_count,
+            keep_recent_rounds=keep_recent_rounds,
+        )
+        if cutoff is not None:
+            progress_summary = await _summarize_researcher_history(
+                researcher_messages[compacted_message_count:cutoff],
+                research_topic,
+                progress_summary,
+                configurable,
+                config,
+            )
+            compacted_message_count = cutoff
+            active_researcher_messages = _build_researcher_active_context(
+                researcher_messages,
+                progress_summary,
+                compacted_message_count,
+            )
+            messages = _prepare_openai_compatible_messages(
+                [SystemMessage(content=researcher_prompt)]
+                + active_researcher_messages,
+                configurable.research_model,
+            )
+            compaction_triggered = True
+
     context_budget = _predict_context_budget(
         "researcher",
         messages,
@@ -691,9 +858,34 @@ async def researcher(state: ResearcherState, config: RunnableConfig) -> Command[
         reserved_output_tokens=configurable.research_model_max_tokens,
         tools=tools,
     )
+    budget_metadata = context_budget.as_metadata("researcher")
+    budget_metadata.update({
+        "context_budget_compaction_triggered": compaction_triggered,
+        "context_budget_pre_compaction_action": initial_budget.action,
+        "context_budget_pre_compaction_utilization": round(
+            initial_budget.utilization, 6
+        ),
+        "context_budget_full_message_count": len(researcher_messages) + 1,
+        "context_budget_active_message_count": len(messages),
+        "context_budget_compacted_message_count": compacted_message_count,
+    })
+
+    state_update = {
+        "research_progress_summary": progress_summary,
+        "researcher_compacted_message_count": compacted_message_count,
+    }
+    if context_budget.action == "hard_limit" and _has_research_evidence(
+        researcher_messages
+    ):
+        logging.warning(
+            "Researcher context remains above the hard limit after compaction; "
+            "routing existing evidence to research compression"
+        )
+        return Command(goto="compress_research", update=state_update)
+
     try:
         response = await research_model.with_config(
-            {"metadata": context_budget.as_metadata("researcher")}
+            {"metadata": budget_metadata}
         ).ainvoke(messages)
     except Exception:
         if _has_research_evidence(researcher_messages):
@@ -701,7 +893,7 @@ async def researcher(state: ResearcherState, config: RunnableConfig) -> Command[
                 "Researcher model failed after evidence was collected; "
                 "falling back to compression"
             )
-            return Command(goto="compress_research")
+            return Command(goto="compress_research", update=state_update)
         raise
     
     # Step 4: Update state and proceed to tool execution
@@ -709,7 +901,8 @@ async def researcher(state: ResearcherState, config: RunnableConfig) -> Command[
         goto="researcher_tools",
         update={
             "researcher_messages": [response],
-            "tool_call_iterations": state.get("tool_call_iterations", 0) + 1
+            "tool_call_iterations": state.get("tool_call_iterations", 0) + 1,
+            **state_update,
         }
     )
 
@@ -823,8 +1016,22 @@ async def compress_research(state: ResearcherState, config: RunnableConfig):
         "tags": ["langsmith:nostream"]
     })
     
-    # Step 2: Prepare messages for compression without mutating graph state.
-    researcher_messages = list(state.get("researcher_messages", []))
+    # Step 2: Use the canonical working view without duplicating archived
+    # evidence as both original messages and a progress summary.
+    full_researcher_messages = list(state.get("researcher_messages", []))
+    base_message_count = min(1, len(full_researcher_messages))
+    progress_summary = state.get("research_progress_summary", "")
+    compacted_message_count = max(
+        base_message_count,
+        state.get("researcher_compacted_message_count", base_message_count),
+    )
+    researcher_messages, compression_input_source = (
+        _build_research_compression_context(
+            full_researcher_messages,
+            progress_summary,
+            compacted_message_count,
+        )
+    )
     
     # Add instruction to switch from research mode to compression mode
     researcher_messages.append(HumanMessage(content=compress_research_simple_human_message))
@@ -848,17 +1055,24 @@ async def compress_research(state: ResearcherState, config: RunnableConfig):
                 context_window=configurable.compression_model_context_window,
                 reserved_output_tokens=configurable.compression_model_max_tokens,
             )
+            budget_metadata = context_budget.as_metadata("compress_research")
+            budget_metadata.update({
+                "context_budget_input_source": compression_input_source,
+                "context_budget_full_message_count": len(full_researcher_messages),
+                "context_budget_active_message_count": len(messages),
+                "context_budget_compacted_message_count": compacted_message_count,
+            })
             
             # Execute compression
             response = await synthesizer_model.with_config(
-                {"metadata": context_budget.as_metadata("compress_research")}
+                {"metadata": budget_metadata}
             ).ainvoke(messages)
             compressed_research = normalize_report_text(response)
             if not compressed_research:
                 raise ValueError("Compression model returned no readable text content")
             
             # Extract raw notes from all tool and AI messages
-            raw_notes_content = _collect_readable_notes(researcher_messages)
+            raw_notes_content = _collect_readable_notes(full_researcher_messages)
             
             # Return successful compression result
             return {
@@ -883,7 +1097,7 @@ async def compress_research(state: ResearcherState, config: RunnableConfig):
             continue
     
     # Step 4: Return error result if all attempts failed
-    raw_notes_content = _collect_readable_notes(researcher_messages)
+    raw_notes_content = _collect_readable_notes(full_researcher_messages)
     
     return {
         "compressed_research": "Error synthesizing research report: Maximum retries exceeded",

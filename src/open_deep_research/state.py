@@ -91,6 +91,8 @@ class ResearcherState(TypedDict):
     research_topic: str
     compressed_research: str
     raw_notes: Annotated[list[str], override_reducer] = []
+    research_progress_summary: NotRequired[str]
+    researcher_compacted_message_count: NotRequired[int]
 
 class ResearcherOutputState(BaseModel):
     """Output state from individual researchers."""
