@@ -140,14 +140,19 @@ Think like a research manager with limited time and resources. Follow these step
 
 1. **Read the question carefully** - What specific information does the user need?
 2. **Decide how to delegate the research** - Carefully consider the question and decide how to delegate the research. Are there multiple independent directions that can be explored simultaneously?
-3. **After each call to ConductResearch, pause and assess** - Do I have enough to answer? What's still missing?
+3. **Identify the likely core conclusions** - Determine which conclusions will directly answer the user and therefore require the strongest evidence.
+4. **After each call to ConductResearch, pause and assess** - Do the core conclusions have direct, reliable support? What material evidence is still missing?
+5. **Separate core gaps from minor gaps** - Continue research for gaps that could change the overall conclusion. Do not spend more calls on minor details that can be disclosed briefly at the end of the report.
 </Instructions>
 
 <Hard Limits>
 **Task Delegation Budgets** (Prevent excessive delegation):
 - **Bias towards single agent** - Use single agent for simplicity unless the user request has clear opportunity for parallelization
 - **Stop when you can answer confidently** - Don't keep delegating research for perfection
-- 如果现有资料已经覆盖用户问题的主要方面，就必须调用 ResearchComplete。
+- 只有当用户问题的主要方面已经覆盖，且核心结论具有直接、可靠的证据支持时，才调用 ResearchComplete。
+- 核心结论应优先由官方或第一方来源直接支持；没有第一方来源时，应尽量由两个相互独立的可信来源交叉印证。
+- 搜索聚合页、转载内容、匿名说法和个人经验不能单独支撑总体结论，只能作为继续查证的线索或有明确限制的补充材料。
+- 如果来源冲突，优先追加一次针对性研究以核对时间、统计口径和原始出处；仍无法解决时，只保留各来源能够共同确认的部分。
 - 不要仅仅因为还能找到更多资料而继续研究。
 - 当边际新增信息很少、来源开始重复，或剩余缺口不影响主要结论时，立即停止。
 - **Limit tool calls** - Always stop after {max_researcher_iterations} tool calls to ConductResearch and think_tool if you cannot find the right sources
@@ -164,8 +169,10 @@ Before you call ConductResearch tool call, use think_tool to plan your approach:
 
 After each ConductResearch tool call, use think_tool to analyze the results:
 - What key information did I find?
-- What's missing?
-- Do I have enough to answer the question comprehensively?
+- Which core conclusions are directly supported, and by what type of source?
+- Are important claims independently corroborated, or supported by an authoritative first-party source?
+- Are there conflicting dates, figures, definitions, or source quality issues?
+- Which missing evidence could materially change the final conclusion?
 - Should I delegate more research or call ResearchComplete?
 </Show Your Thinking>
 
@@ -204,10 +211,20 @@ You have access to two main tools:
 Think like a human researcher with limited time. Follow these steps:
 
 1. **Read the question carefully** - What specific information does the user need?
-2. **Start with broader searches** - Use broad, comprehensive queries first
-3. **After each search, pause and assess** - Do I have enough to answer? What's still missing?
-4. **Execute narrower searches as you gather information** - Fill in the gaps
-5. **Stop when you can answer confidently** - Don't keep searching for perfection
+2. **Identify the claims that need proof** - List the facts, dates, figures, and conclusions that will materially affect the answer.
+3. **Start with authoritative sources** - Prefer official websites, government records, regulatory filings, original papers, standards, and first-party announcements. Use reputable independent reporting for corroboration and context.
+4. **After each search, pause and assess** - Which claims are verified, which are only leads, and what material evidence is still missing?
+5. **Execute narrower searches as you gather information** - Trace important claims back to their original source and resolve conflicting dates, figures, definitions, or versions.
+6. **Stop when you can answer confidently** - Don't keep searching for perfection once the core conclusions are supported.
+
+<Evidence Standards>
+- A core claim should be supported by an authoritative first-party source or, when that is unavailable, by at least two credible and independent sources whenever practical.
+- Search-result snippets, aggregators, copied articles, anonymous claims, and personal anecdotes are leads, not sufficient proof for a core conclusion on their own.
+- For every important number, preserve its date or period, subject, unit, scope, and statistical definition when available.
+- Distinguish verified fact from interpretation. Do not turn an inference, prediction, marketing claim, or interview anecdote into an established fact.
+- When sources conflict, check publication date, source authority, original wording, and measurement scope. Preserve only the common confirmed facts if the conflict cannot be resolved.
+- Return concrete evidence and source URLs. Keep important unresolved issues concise and separate from verified findings.
+</Evidence Standards>
 </Instructions>
 
 <Hard Limits>
@@ -217,16 +234,17 @@ Think like a human researcher with limited time. Follow these steps:
 - **Always stop**: After 5 search tool calls if you cannot find the right sources
 
 **Stop Immediately When**:
-- You can answer the user's question comprehensively
-- You have 3+ relevant examples/sources for the question
+- You can answer the user's question and its core conclusions are adequately supported
+- The important claims have authoritative first-party support or sufficient independent corroboration
 - Your last 2 searches returned similar information
 </Hard Limits>
 
 <Show Your Thinking>
 After each search tool call, use think_tool to analyze the results:
 - What key information did I find?
-- What's missing?
-- Do I have enough to answer the question comprehensively?
+- Which claims are verified, and which are still only plausible or reported by one weak source?
+- Are the key dates, figures, definitions, and source URLs preserved?
+- What missing evidence could materially change the answer?
 - Should I search more or provide my answer?
 </Show Your Thinking>
 """
@@ -239,26 +257,37 @@ compress_research_system_prompt = """你负责将研究记录压缩成高信息�
 <Guidelines>
 1. 删除重复、无关、低价值和仅用于规划的内容。
 2. 将表达相同结论的多个来源合并为一条结论，并在结论后保留多个来源。
-3. 优先保留具体事实、数字、日期、争议、限制条件和直接支持研究问题的内容。
+3. 优先保留直接支持研究问题的已核实事实、数字、日期、适用范围和限制条件。
 4. 删除搜索过程、思考过程、工具调用说明和重复背景。
 5. 不要逐字复述网页摘要；使用简洁语言归纳。
 6. 每个唯一事实只出现一次。
-7. 不确定或互相冲突的资料必须明确标注，不能强行合并。
-8. 只保留实际用于结论的来源。
-9. 不得编造研究记录中不存在的事实、数字、结论或来源。
-10. 来源链接必须使用研究记录中实际出现的 URL。
-11. 输出控制在约 7500 tokens 内。
+7. 将证据分为“已核实”“有限证据”“无法核实”三类，不得混写：
+   - 已核实：有官方或第一方直接来源，或者有两个相互独立的可信来源交叉印证。
+   - 有限证据：与研究问题重要相关，但目前只有单一二手来源、个人经验或缺少关键口径。
+   - 无法核实：来源冲突且无法消解，或没有足够公开证据支持。
+8. 总体结论只能建立在“已核实”内容上；不得使用有限证据或无法核实内容支撑确定性判断。
+9. 搜索聚合页、转载内容、匿名说法和个人经验不能单独升级为已核实事实。
+10. 对重要数字保留时间、对象、单位、范围和统计口径；缺少关键口径时放入“有限证据”。
+11. 来源冲突时先保留各方共同确认的部分；冲突细节仅在确实影响总体判断时简要记录。
+12. 无法核实的信息不是核心结论。只保留会实质影响用户判断的少量事项，不重复渲染同一缺口。
+13. 只保留实际用于结论或解释关键限制的来源。
+14. 不得编造研究记录中不存在的事实、数字、结论或来源。
+15. 来源链接必须使用研究记录中实际出现的 URL。
+16. 输出控制在约 7500 tokens 内。
 </Guidelines>
 
 <Output Format>
-## 核心结论
-直接回答当前研究主题的核心发现。
+## 已核实的核心结论
+只使用已核实证据，直接回答当前研究主题。每条结论后标注对应来源。
 
-## 合并后的关键证据
-按主题组织证据。合并表达相同结论的来源，并在相关结论后标注来源。
+## 支撑证据
+按核心结论或主题组织，优先使用分条形式。保留具体事实、数字、日期、适用范围、限制条件和来源。
 
-## 分歧与不确定性
-列出资料之间的冲突、证据缺口、口径差异和无法确认的内容。没有明显分歧时写“未发现重大分歧”。
+## 有限证据
+只列出对研究问题有价值、但尚不足以作为确定事实的信息，并说明证据为什么有限。没有则写“无”。
+
+## 无法核实的信息
+只列出可能实质影响总体结论的冲突、证据缺口或口径差异，每项一句话说明缺少什么证据。没有则写“未发现影响总体结论的重大未核实事项”。
 
 ## 来源
 只列出正文中实际使用的来源。每个唯一 URL 只出现一次。
@@ -275,7 +304,7 @@ compress_research_system_prompt = """你负责将研究记录压缩成高信息�
 """
 
 compress_research_simple_human_message = """请根据系统要求，将以上研究记录压缩成高信息密度的证据摘要。
-重点保留直接支持当前研究主题的事实、数字、日期、限制条件、分歧和来源链接；删除重复内容、搜索过程、思考过程和工具调用说明。
+重点保留直接支持当前研究主题的已核实事实、数字、日期、限制条件和来源链接；将有限证据与无法核实的信息单独放置，不得与确定事实混写。删除重复内容、搜索过程、思考过程和工具调用说明。
 """
 
 final_report_generation_prompt = """Based on all the research conducted, create a comprehensive, well-structured answer to the overall research brief:
@@ -298,55 +327,48 @@ Here are the findings from the research that you conducted:
 {findings}
 </Findings>
 
-Please create a detailed answer to the overall research brief that:
-1. Is well-organized with proper headings (# for title, ## for sections, ### for subsections)
-2. Includes specific facts and insights from the research
-3. References relevant sources using [Title](URL) format
-4. Provides a balanced, thorough analysis. Be as comprehensive as possible, and include all information that is relevant to the overall research question. People are using you for deep research and will expect detailed, comprehensive answers.
-5. Includes a "Sources" section at the end with all referenced links
+<Evidence Policy>
+- Base the main report and its overall conclusion only on facts supported by the provided findings.
+- Treat a claim as established when the findings provide an authoritative first-party source or sufficient independent corroboration. Do not turn a single weak source, anecdote, inference, prediction, marketing claim, or search snippet into a confirmed fact.
+- Keep each important number together with its date or period, subject, unit, scope, and statistical definition when those details are available.
+- If sources conflict, report only the common confirmed facts in the main analysis. Put an unresolved conflict at the end only when it could materially affect the user's decision.
+- Do not repeatedly qualify the main text with “可能”, “据称”, “无法确认”, “尚不清楚”, or equivalent wording. Move material unsupported items to the final verification-limit section instead.
+- Do not manufacture certainty. If the available findings do not support a requested conclusion, state the narrower conclusion that is actually supported.
+</Evidence Policy>
 
-You can structure your report in a number of different ways. Here are some examples:
+<Required Report Structure>
+# 报告标题（使用与用户相同的语言）
 
-To answer a question that asks you to compare two things, you might structure your report like this:
-1/ intro
-2/ overview of topic A
-3/ overview of topic B
-4/ comparison between A and B
-5/ conclusion
+## 总体结论
+Start the report with the direct overall answer, not background or a description of the research process. Use one to three concise paragraphs or a short bullet list. State only conclusions supported by verified evidence and include citations near the claims.
 
-To answer a question that asks you to return a list of things, you might only need a single section which is the entire list.
-1/ list of things or table of things
-Or, you could choose to make each item in the list a separate section in the report. When asked for lists, you don't need an introduction or conclusion.
-1/ item 1
-2/ item 2
-3/ item 3
+## 主要发现
+Present the most decision-relevant confirmed findings as clear bullet points. Each bullet should state the finding first, then the supporting fact, date or scope, and citation. Do not mix unresolved claims into this section.
 
-To answer a question that asks you to summarize a topic, give a report, or give an overview, you might structure your report like this:
-1/ overview of topic
-2/ concept 1
-3/ concept 2
-4/ concept 3
-5/ conclusion
+## 分项分析
+Organize the remaining verified evidence by topic. Prefer bullets, numbered lists, or a compact table when they improve clarity. Explain how each topic affects the overall conclusion. Use paragraphs only when needed for reasoning that cannot be expressed clearly as bullets.
 
-If you think you can answer the question with a single section, you can do that too!
-1/ answer
+## 无法核实的信息
+Keep this section short and place it near the end. Include only unresolved items that could materially affect the conclusion. For each item, state in one concise bullet what cannot be verified and what evidence is missing. If none materially affect the conclusion, write the equivalent of “未发现影响总体结论的重大未核实事项” in the user's language.
 
-REMEMBER: Section is a VERY fluid and loose concept. You can structure your report however you think is best, including in ways that are not listed above!
-Make sure that your sections are cohesive, and make sense for the reader.
+### Sources
+List only sources actually cited in the report.
+</Required Report Structure>
 
-For each section of the report, do the following:
-- Use simple, clear language
-- Use ## for section title (Markdown format) for each section of the report
-- Do NOT ever refer to yourself as the writer of the report. This should be a professional report without any self-referential language. 
-- Do not say what you are doing in the report. Just write the report without any commentary from yourself.
-- Each section should be as long as necessary to deeply answer the question with the information you have gathered. It is expected that sections will be fairly long and verbose. You are writing a deep research report, and users will expect a thorough answer.
-- Use bullet points to list out information when appropriate, but by default, write in paragraph form.
+Additional requirements:
+1. Use clear Markdown headings and simple, professional language.
+2. Put the conclusion first and details afterward; do not add a separate introductory background section before the conclusion.
+3. Prefer concise bullet points over long, repetitive paragraphs.
+4. Include concrete facts, dates, figures, limitations, and source links where they support the answer.
+5. Do not refer to yourself, the agent, prompts, tools, searches, findings, or the writing process.
+6. Do not add information that is absent from the provided research findings.
+7. Keep the report comprehensive on verified evidence, but do not include weak or irrelevant material merely to make it longer.
 
 REMEMBER:
 The brief and research may be in English, but you need to translate this information to the right language when writing the final answer.
 Make sure the final answer report is in the SAME language as the human messages in the message history.
 
-Format the report in clear markdown with proper structure and include source references where appropriate.
+Format the report in clear Markdown using the required structure above.
 
 <Citation Rules>
 - Assign each unique URL a single citation number in your text
