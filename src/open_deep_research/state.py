@@ -21,6 +21,22 @@ class ConductResearch(BaseModel):
 class ResearchComplete(BaseModel):
     """Call this tool to indicate that the research is complete."""
 
+
+class AskClarification(BaseModel):
+    """Choose this route when essential information is missing."""
+
+    question: str = Field(
+        description="One concise question that gathers all essential missing information.",
+    )
+
+
+class AnswerSimply(BaseModel):
+    """Choose this route for a stable question that needs no research or sources."""
+
+
+class StartDeepResearch(BaseModel):
+    """Choose this route for complex, current, source-based, or uncertain requests."""
+
 class Summary(BaseModel):
     """Research summary with key findings."""
     
@@ -64,7 +80,8 @@ class AgentInputState(MessagesState):
 
 class AgentState(MessagesState):
     """Main agent state containing messages and research data."""
-    
+
+    clarification_question: Optional[str]
     supervisor_messages: Annotated[list[MessageLikeRepresentation], override_reducer]
     research_brief: Optional[str]
     raw_notes: Annotated[list[str], override_reducer] = []

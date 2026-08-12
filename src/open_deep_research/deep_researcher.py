@@ -27,23 +27,26 @@ from open_deep_research.context_manager import (
 )
 from open_deep_research.email_report import normalize_report_text, send_report_email_async
 from open_deep_research.prompts import (
-    clarify_with_user_instructions,
     compress_research_simple_human_message,
     compress_research_system_prompt,
     final_report_generation_prompt,
     lead_researcher_prompt,
     research_system_prompt,
+    route_user_request_instructions,
+    simple_answer_instructions,
     transform_messages_into_research_topic_prompt,
 )
 from open_deep_research.state import (
     AgentInputState,
     AgentState,
-    ClarifyWithUser,
+    AnswerSimply,
+    AskClarification,
     ConductResearch,
     ResearchComplete,
     ResearcherOutputState,
     ResearcherState,
     ResearchQuestion,
+    StartDeepResearch,
     SupervisorState,
 )
 from open_deep_research.utils import (
@@ -357,62 +360,131 @@ NEWLY ARCHIVED RESEARCH MESSAGES:
     return summary
 
 
-async def clarify_with_user(state: AgentState, config: RunnableConfig) -> Command[Literal["write_research_brief", "__end__"]]:
-    """Analyze user messages and ask clarifying questions if the research scope is unclear.
-    
-    This function determines whether the user's request needs clarification before proceeding
-    with research. If clarification is disabled or not needed, it proceeds directly to research.
-    
-    Args:
-        state: Current agent state containing user messages
-        config: Runtime configuration with model settings and preferences
-        
-    Returns:
-        Command to either end with a clarifying question or proceed to research brief
-    """
-    # Step 1: Check if clarification is enabled in configuration
+async def route_user_request(
+    state: AgentState,
+    config: RunnableConfig,
+) -> Command[
+    Literal["clarify_with_user", "simple_answer", "write_research_brief"]
+]:
+    """Route one clear request without JSON mode or Pydantic output parsing."""
     configurable = Configuration.from_runnable_config(config)
-    if not configurable.allow_clarification:
-        # Skip clarification step and proceed directly to research
-        return Command(goto="write_research_brief")
-    
-    # Step 2: Prepare the model for structured clarification analysis
-    messages = state["messages"]
+    routing_tools = [AnswerSimply, StartDeepResearch]
+    if configurable.allow_clarification:
+        routing_tools.insert(0, AskClarification)
+
     model_config = {
         "model": configurable.research_model,
         "max_tokens": configurable.research_model_max_tokens,
         "api_key": get_api_key_for_model(configurable.research_model, config),
         "base_url": get_base_url_for_model(configurable.research_model),
-        "use_responses_api": get_use_responses_api_for_model(configurable.research_model),
-        "tags": ["langsmith:nostream"]
+        "use_responses_api": get_use_responses_api_for_model(
+            configurable.research_model
+        ),
+        "tags": ["langsmith:nostream"],
     }
-    
-    # Configure model with structured output and retry logic
-    clarification_model = (
-        configurable_model.with_config(model_config)
-        | PydanticOutputParser(pydantic_object=ClarifyWithUser)
-    ).with_retry(stop_after_attempt=configurable.max_structured_output_retries)
-    
-    # Step 3: Analyze whether clarification is needed
-    prompt_content = clarify_with_user_instructions.format(
-        messages=get_buffer_string(messages), 
-        date=get_today_str()
+    routing_model = (
+        configurable_model
+        .bind_tools(routing_tools)
+        .with_retry(stop_after_attempt=configurable.max_structured_output_retries)
+        .with_config(model_config)
     )
-    response = await clarification_model.ainvoke([HumanMessage(content=prompt_content)])
-    
-    # Step 4: Route based on clarification analysis
-    if response.need_clarification:
-        # End with clarifying question for user
-        return Command(
-            goto=END, 
-            update={"messages": [AIMessage(content=response.question)]}
+    prompt = route_user_request_instructions.format(
+        messages=get_buffer_string(state.get("messages", [])),
+        date=get_today_str(),
+        allow_clarification=str(configurable.allow_clarification).lower(),
+    )
+
+    try:
+        response = await routing_model.ainvoke([HumanMessage(content=prompt)])
+    except Exception:
+        logging.exception(
+            "Entry routing failed; falling back to the existing deep-research path"
         )
-    else:
-        # Proceed to research with verification message
-        return Command(
-            goto="write_research_brief", 
-            update={"messages": [AIMessage(content=response.verification)]}
+        return Command(goto="write_research_brief")
+
+    recognized_names = {
+        "AskClarification",
+        "AnswerSimply",
+        "StartDeepResearch",
+    }
+    recognized_calls = [
+        call
+        for call in (getattr(response, "tool_calls", None) or [])
+        if call.get("name") in recognized_names
+    ]
+    if len(recognized_calls) != 1:
+        logging.warning(
+            "Entry router returned %s recognized tool calls; defaulting to deep research",
+            len(recognized_calls),
         )
+        return Command(goto="write_research_brief")
+
+    route_call = recognized_calls[0]
+    route_name = route_call["name"]
+    if route_name == "AskClarification":
+        if not configurable.allow_clarification:
+            return Command(goto="write_research_brief")
+        args = route_call.get("args") or {}
+        question = args.get("question") if isinstance(args, dict) else None
+        if not isinstance(question, str) or not question.strip():
+            question = "请补充完成这项任务所必需的目标、对象或范围。"
+        return Command(
+            goto="clarify_with_user",
+            update={"clarification_question": question.strip()},
+        )
+    if route_name == "AnswerSimply":
+        return Command(goto="simple_answer")
+    return Command(goto="write_research_brief")
+
+
+async def simple_answer(
+    state: AgentState,
+    config: RunnableConfig,
+) -> Command[Literal["write_research_brief", "__end__"]]:
+    """Answer stable questions plainly; failures fall back to deep research."""
+    configurable = Configuration.from_runnable_config(config)
+    model_config = {
+        "model": configurable.research_model,
+        "max_tokens": configurable.research_model_max_tokens,
+        "api_key": get_api_key_for_model(configurable.research_model, config),
+        "base_url": get_base_url_for_model(configurable.research_model),
+        "use_responses_api": get_use_responses_api_for_model(
+            configurable.research_model
+        ),
+        "tags": ["langsmith:nostream"],
+    }
+    prompt = simple_answer_instructions.format(
+        messages=get_buffer_string(state.get("messages", [])),
+        date=get_today_str(),
+    )
+    try:
+        response = await configurable_model.with_config(model_config).ainvoke(
+            [HumanMessage(content=prompt)]
+        )
+    except Exception:
+        logging.exception(
+            "Simple answer failed; falling back to the existing deep-research path"
+        )
+        return Command(goto="write_research_brief")
+
+    if not normalize_report_text(response):
+        logging.warning("Simple answer returned no readable text; using deep research")
+        return Command(goto="write_research_brief")
+    return Command(goto=END, update={"messages": [response]})
+
+
+async def clarify_with_user(
+    state: AgentState,
+    config: RunnableConfig,
+) -> Command[Literal["__end__"]]:
+    """Display the question already selected by the entry router."""
+    question = state.get("clarification_question")
+    if not isinstance(question, str) or not question.strip():
+        question = "请补充完成这项任务所必需的目标、对象或范围。"
+    return Command(
+        goto=END,
+        update={"messages": [AIMessage(content=question.strip())]},
+    )
 
 
 async def write_research_brief(state: AgentState, config: RunnableConfig) -> Command[Literal["research_supervisor"]]:
@@ -1284,6 +1356,9 @@ deep_researcher_builder = StateGraph(
 )
 
 # Add main workflow nodes for the complete research process
+# The new entry router is isolated from the established deep-research chain.
+deep_researcher_builder.add_node("route_user_request", route_user_request)
+deep_researcher_builder.add_node("simple_answer", simple_answer)
 deep_researcher_builder.add_node("clarify_with_user", clarify_with_user)           # User clarification phase
 deep_researcher_builder.add_node("write_research_brief", write_research_brief)     # Research planning phase
 deep_researcher_builder.add_node("research_supervisor", supervisor_subgraph)       # Research execution phase
@@ -1291,7 +1366,7 @@ deep_researcher_builder.add_node("final_report_generation", final_report_generat
 deep_researcher_builder.add_node("send_report_email", send_report_email)           # Optional email delivery
 
 # Define main workflow edges for sequential execution
-deep_researcher_builder.add_edge(START, "clarify_with_user")                       # Entry point
+deep_researcher_builder.add_edge(START, "route_user_request")                      # Entry point
 deep_researcher_builder.add_edge("research_supervisor", "final_report_generation") # Research to report
 deep_researcher_builder.add_edge("final_report_generation", "send_report_email")   # Report to email
 deep_researcher_builder.add_edge("send_report_email", END)                         # Final exit point

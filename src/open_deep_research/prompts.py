@@ -1,5 +1,43 @@
 """System prompts and prompt templates for the Deep Research agent."""
 
+route_user_request_instructions = """Decide exactly one route for the user's request.
+
+Messages exchanged so far:
+<Messages>
+{messages}
+</Messages>
+
+Today's date is {date}.
+Clarification is allowed: {allow_clarification}.
+
+Call exactly one available routing tool:
+- AskClarification: only when essential information is missing and proceeding would
+  require a material assumption. Put one concise, comprehensive question in `question`.
+- AnswerSimply: only for a clear, stable question that can be answered accurately
+  from general knowledge without web search, fresh information, citations, comparison,
+  extensive analysis, or a report.
+- StartDeepResearch: for requests involving current facts, named companies or people,
+  sources or citations, recommendations, comparisons, investigation, multiple research
+  dimensions, substantial analysis, or any uncertainty about whether research is needed.
+
+If the conversation shows that a clarification question was already answered, do not
+ask it again. When uncertain between AnswerSimply and StartDeepResearch, choose
+StartDeepResearch. Do not answer the request in text; select one routing tool only.
+"""
+
+
+simple_answer_instructions = """Answer the user's clear, stable question directly and
+concisely using general knowledge. Do not claim to have searched the web, do not invent
+citations, and do not mention internal routing. Use plain text or Markdown as appropriate.
+
+Messages exchanged so far:
+<Messages>
+{messages}
+</Messages>
+
+Today's date is {date}.
+"""
+
 clarify_with_user_instructions="""
 These are the messages that have been exchanged so far from the user asking for the report:
 <Messages>
