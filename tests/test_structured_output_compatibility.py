@@ -38,10 +38,15 @@ def test_json_mode_prompts_contain_lowercase_json_keyword():
     prompts = [
         clarify_with_user_instructions,
         transform_messages_into_research_topic_prompt,
-        summarize_webpage_prompt,
     ]
 
     assert all("json" in prompt for prompt in prompts)
+
+
+def test_webpage_summary_prompt_uses_tags_instead_of_json():
+    assert "json" not in summarize_webpage_prompt.lower()
+    assert "<summary>" in summarize_webpage_prompt
+    assert "<key_excerpts>" in summarize_webpage_prompt
 
 
 def test_custom_responses_gateway_maps_system_to_developer(monkeypatch):

@@ -3,6 +3,7 @@
 import asyncio
 import logging
 import os
+import re
 import warnings
 from datetime import datetime, timedelta, timezone
 from typing import Annotated, Any, Dict, List, Literal, Optional
@@ -17,7 +18,6 @@ from langchain_core.messages import (
     MessageLikeRepresentation,
     filter_messages,
 )
-from langchain_core.output_parsers import PydanticOutputParser
 from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import (
     BaseTool,
@@ -33,7 +33,7 @@ from tavily import AsyncTavilyClient
 
 from open_deep_research.configuration import Configuration, SearchAPI
 from open_deep_research.prompts import summarize_webpage_prompt
-from open_deep_research.state import ResearchComplete, Summary
+from open_deep_research.state import ResearchComplete
 
 ##########################
 # Tavily Search Tool Utils
@@ -119,20 +119,18 @@ async def tavily_search(
     # Character limit to stay within model token limits (configurable)
     max_char_to_include = configurable.max_content_length
     
-    # Initialize summarization model with retry logic
+    # Retry transport/model failures only. Webpage summaries are deliberately
+    # parsed locally so malformed model formatting cannot fail the tool call.
     model_api_key = get_api_key_for_model(configurable.summarization_model, config)
-    summarization_model = (
-        init_chat_model(
-            model=configurable.summarization_model,
-            max_tokens=configurable.summarization_model_max_tokens,
-            api_key=model_api_key,
-            base_url=get_base_url_for_model(configurable.summarization_model),
-            use_responses_api=get_use_responses_api_for_model(
-                configurable.summarization_model
-            ),
-            tags=["langsmith:nostream"],
-        )
-        | PydanticOutputParser(pydantic_object=Summary)
+    summarization_model = init_chat_model(
+        model=configurable.summarization_model,
+        max_tokens=configurable.summarization_model_max_tokens,
+        api_key=model_api_key,
+        base_url=get_base_url_for_model(configurable.summarization_model),
+        use_responses_api=get_use_responses_api_for_model(
+            configurable.summarization_model
+        ),
+        tags=["langsmith:nostream"],
     ).with_retry(
         stop_after_attempt=configurable.max_structured_output_retries
     )
@@ -223,6 +221,69 @@ async def tavily_search_async(
     search_results = await asyncio.gather(*search_tasks)
     return search_results
 
+def _visible_model_text(response: Any) -> str:
+    """Extract visible text without including Responses API reasoning blocks."""
+    content = getattr(response, "content", response)
+    if isinstance(content, str):
+        return content.strip()
+    if not isinstance(content, list):
+        return str(content or "").strip()
+
+    parts = []
+    for block in content:
+        if isinstance(block, str):
+            parts.append(block)
+        elif (
+            isinstance(block, dict)
+            and block.get("type") in {"text", "output_text"}
+        ):
+            text = block.get("text")
+            if isinstance(text, str):
+                parts.append(text)
+    return "\n".join(part for part in parts if part).strip()
+
+
+def _extract_summary_tag(text: str, tag: str) -> str:
+    """Extract a complete or truncated tag without raising parse errors."""
+    complete = re.search(
+        rf"<{tag}>\s*(.*?)\s*</{tag}>",
+        text,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    if complete:
+        return complete.group(1).strip()
+
+    opening = re.search(rf"<{tag}>\s*", text, flags=re.IGNORECASE)
+    if not opening:
+        return ""
+    remainder = text[opening.end():]
+    next_tag = re.search(
+        r"</?(?:summary|key_excerpts)>",
+        remainder,
+        flags=re.IGNORECASE,
+    )
+    return remainder[:next_tag.start() if next_tag else None].strip()
+
+
+def _format_webpage_summary(response: Any) -> str:
+    """Normalize a model response into the stable search-tool output format."""
+    text = _visible_model_text(response)
+    if not text:
+        return ""
+
+    summary = _extract_summary_tag(text, "summary")
+    key_excerpts = _extract_summary_tag(text, "key_excerpts")
+    if not summary:
+        # A usable model response should never be discarded merely because it
+        # missed a tag. Preserve it as the summary and leave excerpts empty.
+        summary = text
+
+    return (
+        f"<summary>\n{summary}\n</summary>\n\n"
+        f"<key_excerpts>\n{key_excerpts}\n</key_excerpts>"
+    )
+
+
 async def summarize_webpage(model: BaseChatModel, webpage_content: str) -> str:
     """Summarize webpage content using AI model with timeout protection.
     
@@ -241,18 +302,18 @@ async def summarize_webpage(model: BaseChatModel, webpage_content: str) -> str:
         )
         
         # Execute summarization with timeout to prevent hanging
-        summary = await asyncio.wait_for(
+        response = await asyncio.wait_for(
             model.ainvoke([HumanMessage(content=prompt_content)]),
             timeout=60.0  # 60 second timeout for summarization
         )
-        
-        # Format the summary with structured sections
-        formatted_summary = (
-            f"<summary>\n{summary.summary}\n</summary>\n\n"
-            f"<key_excerpts>\n{summary.key_excerpts}\n</key_excerpts>"
+
+        formatted_summary = _format_webpage_summary(response)
+        if formatted_summary:
+            return formatted_summary
+        logging.warning(
+            "Summarization returned no visible text, returning original content"
         )
-        
-        return formatted_summary
+        return webpage_content
         
     except asyncio.TimeoutError:
         # Timeout during summarization - return original content
