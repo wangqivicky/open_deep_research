@@ -360,6 +360,31 @@ NEWLY ARCHIVED RESEARCH MESSAGES:
     return summary
 
 
+def _build_entry_model_messages(prompt_template, messages, **prompt_values):
+    """Keep uploaded image blocks intact while preserving text-only behavior."""
+    original_messages = list(messages)
+    has_multimodal_content = any(
+        not isinstance(getattr(message, "content", None), str)
+        for message in original_messages
+    )
+    if has_multimodal_content:
+        rendered_messages = (
+            "The original conversation, including its multimodal content, follows "
+            "this instruction as separate messages."
+        )
+    else:
+        rendered_messages = get_buffer_string(original_messages)
+
+    prompt = prompt_template.format(
+        messages=rendered_messages,
+        **prompt_values,
+    )
+    instruction = HumanMessage(content=prompt)
+    if has_multimodal_content:
+        return [instruction, *original_messages]
+    return [instruction]
+
+
 async def route_user_request(
     state: AgentState,
     config: RunnableConfig,
@@ -388,14 +413,15 @@ async def route_user_request(
         .with_retry(stop_after_attempt=configurable.max_structured_output_retries)
         .with_config(model_config)
     )
-    prompt = route_user_request_instructions.format(
-        messages=get_buffer_string(state.get("messages", [])),
+    model_messages = _build_entry_model_messages(
+        route_user_request_instructions,
+        state.get("messages", []),
         date=get_today_str(),
         allow_clarification=str(configurable.allow_clarification).lower(),
     )
 
     try:
-        response = await routing_model.ainvoke([HumanMessage(content=prompt)])
+        response = await routing_model.ainvoke(model_messages)
     except Exception:
         logging.exception(
             "Entry routing failed; falling back to the existing deep-research path"
@@ -453,13 +479,14 @@ async def simple_answer(
         ),
         "tags": ["langsmith:nostream"],
     }
-    prompt = simple_answer_instructions.format(
-        messages=get_buffer_string(state.get("messages", [])),
+    model_messages = _build_entry_model_messages(
+        simple_answer_instructions,
+        state.get("messages", []),
         date=get_today_str(),
     )
     try:
         response = await configurable_model.with_config(model_config).ainvoke(
-            [HumanMessage(content=prompt)]
+            model_messages
         )
     except Exception:
         logging.exception(
@@ -519,11 +546,12 @@ async def write_research_brief(state: AgentState, config: RunnableConfig) -> Com
     ).with_retry(stop_after_attempt=configurable.max_structured_output_retries)
     
     # Step 2: Generate structured research brief from user messages
-    prompt_content = transform_messages_into_research_topic_prompt.format(
-        messages=get_buffer_string(state.get("messages", [])),
+    model_messages = _build_entry_model_messages(
+        transform_messages_into_research_topic_prompt,
+        state.get("messages", []),
         date=get_today_str()
     )
-    response = await research_model.ainvoke([HumanMessage(content=prompt_content)])
+    response = await research_model.ainvoke(model_messages)
     
     # Step 3: Initialize supervisor with research brief and instructions
     supervisor_system_prompt = lead_researcher_prompt.format(

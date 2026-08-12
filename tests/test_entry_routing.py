@@ -37,12 +37,12 @@ def _tool_response(name, args=None, call_id="route-1"):
     )
 
 
-def _run_router(monkeypatch, response, configurable=None):
+def _run_router(monkeypatch, response, configurable=None, messages=None):
     model = FakeModel(response)
     monkeypatch.setattr(deep_researcher, "configurable_model", model)
     result = asyncio.run(
         deep_researcher.route_user_request(
-            {"messages": [HumanMessage(content="user request")]},
+            {"messages": messages or [HumanMessage(content="user request")]},
             {"configurable": configurable or {}},
         )
     )
@@ -79,6 +79,28 @@ def test_router_sends_stable_question_to_simple_answer(monkeypatch):
     result, _ = _run_router(monkeypatch, _tool_response("AnswerSimply"))
 
     assert result.goto == "simple_answer"
+
+
+def test_router_preserves_uploaded_image_blocks(monkeypatch):
+    user_message = HumanMessage(
+        content=[
+            {"type": "text", "text": "Read the text in this image."},
+            {
+                "type": "image_url",
+                "image_url": {"url": "data:image/png;base64,aW1hZ2U="},
+            },
+        ]
+    )
+
+    result, model = _run_router(
+        monkeypatch,
+        _tool_response("AnswerSimply"),
+        messages=[user_message],
+    )
+
+    assert result.goto == "simple_answer"
+    assert model.invocations[0][1] is user_message
+    assert model.invocations[0][1].content[1]["type"] == "image_url"
 
 
 def test_router_sends_research_request_to_existing_deep_path(monkeypatch):
@@ -136,6 +158,43 @@ def test_simple_answer_returns_plain_model_message(monkeypatch):
 
     assert result.goto == "__end__"
     assert result.update["messages"] == [response]
+
+
+def test_simple_answer_preserves_uploaded_image_blocks(monkeypatch):
+    response = AIMessage(content="The image says hello.")
+    model = FakeModel(response)
+    monkeypatch.setattr(deep_researcher, "configurable_model", model)
+    user_message = HumanMessage(
+        content=[
+            {"type": "text", "text": "Read this image."},
+            {
+                "type": "image_url",
+                "image_url": {"url": "data:image/png;base64,aW1hZ2U="},
+            },
+        ]
+    )
+
+    result = asyncio.run(
+        deep_researcher.simple_answer(
+            {"messages": [user_message]},
+            {"configurable": {}},
+        )
+    )
+
+    assert result.goto == "__end__"
+    assert model.invocations[0][1] is user_message
+    assert model.invocations[0][1].content[1]["type"] == "image_url"
+
+
+def test_text_only_entry_input_keeps_existing_single_message_shape():
+    model_messages = deep_researcher._build_entry_model_messages(
+        "Messages: {messages}; date: {date}",
+        [HumanMessage(content="What is RAG?")],
+        date="2026-08-12",
+    )
+
+    assert len(model_messages) == 1
+    assert "Human: What is RAG?" in model_messages[0].content
 
 
 def test_simple_answer_failure_falls_back_to_deep_research(monkeypatch):

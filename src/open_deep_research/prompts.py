@@ -15,7 +15,8 @@ Call exactly one available routing tool:
   require a material assumption. Put one concise, comprehensive question in `question`.
 - AnswerSimply: only for a clear, stable question that can be answered accurately
   from general knowledge without web search, fresh information, citations, comparison,
-  extensive analysis, or a report.
+  extensive analysis, or a report. Direct understanding or OCR of an attached image
+  also belongs here unless the user requests broader research.
 - StartDeepResearch: for requests involving current facts, named companies or people,
   sources or citations, recommendations, comparisons, investigation, multiple research
   dimensions, substantial analysis, or any uncertainty about whether research is needed.
@@ -29,6 +30,7 @@ StartDeepResearch. Do not answer the request in text; select one routing tool on
 simple_answer_instructions = """Answer the user's clear, stable question directly and
 concisely using general knowledge. Do not claim to have searched the web, do not invent
 citations, and do not mention internal routing. Use plain text or Markdown as appropriate.
+Use any attached image content in the original conversation when answering.
 
 Messages exchanged so far:
 <Messages>
