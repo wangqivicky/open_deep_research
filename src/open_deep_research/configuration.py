@@ -75,7 +75,7 @@ class Configuration(BaseModel):
         }
     )
     max_concurrent_summarizations: int = Field(
-        default=3,
+        default=10,
         ge=1,
         metadata={
             "x_oap_ui_config": {
